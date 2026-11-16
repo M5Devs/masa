@@ -1435,6 +1435,9 @@ static void test_sdk_init_stub(void)
     CHECK(file_exists(path));
     snprintf(path, sizeof(path), "%s/usr/lib/libSystem.B.tbd", dir);
     CHECK(file_exists(path));
+    /* Newer clang implicitly links -lgcc_s.1 for x86_64 Darwin. */
+    snprintf(path, sizeof(path), "%s/usr/lib/libgcc_s.1.tbd", dir);
+    CHECK(file_exists(path));
     snprintf(path, sizeof(path), "%s/usr/lib/crt1.o", dir);
     CHECK(file_exists(path));
     snprintf(path, sizeof(path), "%s/usr/include/stdlib.h", dir);

@@ -118,8 +118,9 @@ int masa_init_shims_main(int argc, char *const argv[])
         return 1;
     }
 
-    printf("masa: created %zu shims in %s\n",
-           (sizeof(masa_shim_tools) / sizeof(masa_shim_tools[0])) - 1, dir);
+    printf("masa: created " MASA_SIZE_FMT " shims in %s\n",
+           MASA_SIZE_ARG((sizeof(masa_shim_tools) /
+                          sizeof(masa_shim_tools[0])) - 1), dir);
     return 0;
 }
 

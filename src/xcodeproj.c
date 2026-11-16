@@ -1323,8 +1323,9 @@ static int xcode_build(int argc, char *const argv[])
         return 1;
     }
 
-    printf("masa: xcode: target '%s' (%zu source%s)\n", proj.product_name,
-           proj.source_count, (proj.source_count == 1) ? "" : "s");
+    printf("masa: xcode: target '%s' (" MASA_SIZE_FMT " source%s)\n",
+           proj.product_name, MASA_SIZE_ARG(proj.source_count),
+           (proj.source_count == 1) ? "" : "s");
 
     if (compile_and_link(parent, &proj, exe) != 0) {
         fprintf(stderr, "masa: xcode build: compilation failed\n");

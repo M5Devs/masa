@@ -24,6 +24,14 @@
 #define MASA_PATH_MAX 4096
 #endif
 
+/*
+ * Portable way to print a size_t.  MinGW's default MSVCRT-based stdio does
+ * not understand the C99 "%zu", so promote the value to unsigned long long
+ * and use "%llu", which every C runtime Masa targets accepts.
+ */
+#define MASA_SIZE_ARG(n) ((unsigned long long)(n))
+#define MASA_SIZE_FMT "%llu"
+
 #ifdef _WIN32
 
 #include <direct.h>

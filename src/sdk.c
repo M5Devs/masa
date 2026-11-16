@@ -78,6 +78,21 @@ static const char *libsystem_tbd(void)
         "...\n";
 }
 
+static const char *libgcc_s_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/usr/lib/libgcc_s.1.dylib'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ ]\n"
+        "...\n";
+}
+
 static const char *crt1_tbd(void)
 {
     return
@@ -162,6 +177,7 @@ struct stub_file {
 static const struct stub_file stub_files[] = {
     { "usr/lib/libSystem.tbd", libsystem_tbd },
     { "usr/lib/libSystem.B.tbd", libsystem_tbd },
+    { "usr/lib/libgcc_s.1.tbd", libgcc_s_tbd },
     { "usr/lib/crt1.o", crt1_tbd },
     { "usr/include/stdlib.h", stdlib_h },
     { "usr/include/string.h", string_h },

@@ -705,7 +705,8 @@ int masa_brew_lint_formula(const struct masa_brew_formula *f,
     if (f->license != NULL) {
         printf("  license:  %s\n", f->license);
     }
-    printf("  install:  %zu step%s\n", f->step_count,
+    printf("  install:  " MASA_SIZE_FMT " step%s\n",
+           MASA_SIZE_ARG(f->step_count),
            (f->step_count == 1) ? "" : "s");
     printf("  test:     %s\n", f->has_test ? "present" : "missing");
     return 0;
@@ -1009,7 +1010,8 @@ static int brew_build(int argc, char *const argv[])
     printf("masa: brew: %s %s\n", f.name, version);
     printf("masa: brew: source %s\n", source_dir);
     printf("masa: brew: keg    %s\n", keg);
-    printf("masa: brew: running %zu install step%s\n", f.step_count,
+    printf("masa: brew: running " MASA_SIZE_FMT " install step%s\n",
+           MASA_SIZE_ARG(f.step_count),
            (f.step_count == 1) ? "" : "s");
 
     status = run_install_steps(source_dir, &f, keg, keg_bin, version);
