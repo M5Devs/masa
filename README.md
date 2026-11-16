@@ -1,31 +1,121 @@
 # Masa
 
-Masa is a cross-compilation wrapper and Darwin environment shim. It lets you
-build macOS Mach-O binaries on a non-macOS host, without Xcode, by driving
-`clang` and answering the platform queries that macOS build systems make.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
+[![Version: v1.1.0](https://img.shields.io/badge/version-v1.1.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
+
+> **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
+> run them in-process on Linux & Android — without a Mac, Xcode, the $99/yr
+> Apple Developer tax, or a macOS CI runner.**
+
+Masa is a cross-compilation wrapper and Darwin environment shim. It drives
+`clang` and LLVM's `ld64.lld` to produce real macOS Mach-O executables on a
+non-macOS host, answers the platform queries macOS build systems make,
+packages the result as a `.dmg` or `.ipa`, and — with the **Danroot** loader —
+*runs* a Mach-O binary in-process on a POSIX host.
 
 Masa is licensed under the GNU General Public License v3.0 or later. See
 [LICENSE](LICENSE).
+
+## Why Masa?
+
+- **No Apple hardware or software.** The SDK is a clean-room stub
+  (`masa sdk init-stub`), the linker is LLVM's `ld64.lld`, and the compiler is
+  the `clang` you already have. Nothing from Apple is downloaded or required.
+- **It doesn't just build — it runs.** `masa danroot` executes a Mach-O
+  `MH_EXECUTE` binary directly on a POSIX host (Linux, Android/Termux),
+  in-process, with no virtual machine, no kernel module and no full Darwin
+  userland. Build and run in one place.
+- **It speaks your build systems.** `masa xcode build` reads a checked-in
+  `.xcodeproj`, `masa brew` lints and builds Homebrew formulas, and
+  `masa exec` / `masa shell` run `make` and shell scripts with `cc`, `ld`,
+  `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's
+  shims.
+- **It ships.** `masa pack --dmg` writes a UDIF disk image and `masa pack
+  --ipa` writes the `Payload/<App>.app` ZIP — both from scratch in C11, with no
+  Apple tooling.
+- **It's small and portable.** Pure C11 built with `-std=c11 -Wall -Wextra
+  -Werror` and no runtime dependencies for the core. Builds on Linux, Windows
+  (MinGW-w64) and Android (NDK).
+
+## How it compares
+
+| | **Masa** | Darling | Mac + Xcode |
+| --- | --- | --- | --- |
+| Host OS | Linux, Windows, Android | Linux, macOS | macOS only |
+| Build Mach-O binaries | ✅ `masa cc`, `masa xcode` | — | ✅ |
+| Run Mach-O binaries | ✅ in-process (Danroot, POSIX hosts) | ✅ compatibility layer | ✅ |
+| Needs a real Apple SDK | ❌ clean-room stub | ✅ macOS frameworks/SDK | ✅ |
+| Needs a Mac | ❌ | ❌ | ✅ |
+| Apple Developer Program ($99/yr) | ❌ | ❌ | ✅ to distribute |
+| Package `.dmg` / `.ipa` | ✅ `masa pack` | — | ✅ |
+| License | GPLv3 | GPLv3 | proprietary |
+
+*Scope note: Masa targets self-contained C/C++ (and Swift) executables linked
+against the stub SDK's `libSystem`. It is not a full macOS userland — a program
+that needs Apple's private frameworks or a GUI toolkit will not run under
+Danroot.*
+
+## Quick Start
+
+```sh
+git clone https://github.com/M5Devs/masa && cd masa && make
+
+# 1. one-time: write a clean-room stub SDK (no Apple SDK needed)
+masa sdk init-stub /opt/masa/sdk
+
+# 2. build a real Mach-O executable
+MASA_SDK_PATH=/opt/masa/sdk masa cc hello.c -o hello
+
+# 3. run it right here — no Mac, no VM, no kernel module
+masa danroot ./hello
+# hello from a Mach-O binary running on Linux!
+```
+
+`masa run` / `masa danroot` is architecture-matched: build for the host's
+architecture (`MASA_TARGET=x86_64-apple-darwin` on an Intel/AMD host;
+`arm64-apple-darwin`, the default, on Apple Silicon). The loader runs on POSIX
+hosts (Linux, Android/Termux); on Windows Masa builds and packages, but
+`masa run` reports that execution is POSIX-only.
+
+**Build an Xcode project, then ship it:**
+
+```sh
+MASA_SDK_PATH=/opt/masa/sdk masa xcode build DemoApp.xcodeproj --bundle
+# masa: xcode: target 'DemoApp' (2 sources)
+# masa: xcode: bundled DemoApp.app
+masa pack --dmg DemoApp.app -o DemoApp.dmg    # UDIF disk image
+masa pack --ipa DemoApp.app -o DemoApp.ipa    # Payload/DemoApp.app ZIP
+```
+
+**Lint and build a Homebrew formula:**
+
+```sh
+masa brew lint mytool.rb
+masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
+```
 
 ## Status
 
 Milestone 11 (v1.1.0): the Masa Danroot loader. `masa run` (aliased as
 `masa danroot`) executes a Mach-O `MH_EXECUTE` binary built by `masa cc`
 directly on a POSIX host - a clean-room, in-process reimplementation of the
-`dyld` steps a self-contained executable needs (segment mapping, chained
-fixups, a `libSystem` shim, the `LC_MAIN` entry call) - so a cross-compiled
-Darwin program can be built and run in one place. This sits on the Milestone
-10 distribution work (`masa pack` to `.ipa`/`.dmg`, the Homebrew single-string
-`system` fix), the Milestone 9 local independence (`masa doctor`, `make dist`,
-self-hosted CI, the Windows ConPTY backend), the Milestone 8 standalone GUI
-terminal (`masa-term`, an optional SDL2 + SDL2_ttf + libvterm front end over a
-real PTY), the Milestone 7 Swift toolchain support and Android
-cross-compilation, the Milestone 6 interactive `masa shell` and portable
-host-services layer, the Milestone 5 Homebrew formula linter and builder
-(`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim,
-the Milestone 3 full Mach-O executable linking, toolchain shims and `masa
-sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec` environment
-runner, which in turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
+`dyld` steps a self-contained executable needs (segment mapping, chained and
+classic dyld-info relocations, a `libSystem` shim, the `LC_MAIN` entry call) -
+so a cross-compiled Darwin program can be built and run in one place. This
+sits on the Milestone 10 distribution work (`masa pack` to `.ipa`/`.dmg`, the
+Homebrew single-string `system` fix), the Milestone 9 local independence
+(`masa doctor`, `make dist`, self-hosted CI, the Windows ConPTY backend), the
+Milestone 8 standalone GUI terminal (`masa-term`, an optional SDL2 + SDL2_ttf
++ libvterm front end over a real PTY), the Milestone 7 Swift toolchain support
+and Android cross-compilation, the Milestone 6 interactive `masa shell` and
+portable host-services layer, the Milestone 5 Homebrew formula linter and
+builder (`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder and
+`codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain
+shims and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
+environment runner, which in turn rest on the Milestone 1 `cc` wrapper and
+`sys` shims.
 
 ## Requirements
 
