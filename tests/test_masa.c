@@ -13,10 +13,12 @@
 
 #include "masa.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -28,6 +30,10 @@
 static int g_run;
 static int g_failed;
 static int g_skipped;
+
+/* Snapshot of PATH, restored by reset_masa_env so tests cannot leak a
+ * modified search path into the ones that follow. */
+static char *g_original_path;
 
 #define CHECK(cond)                                                          \
     do {                                                                     \
@@ -226,6 +232,10 @@ static void reset_masa_env(void)
     set_env(MASA_SDK_PATH_ENV, NULL);
     set_env(MASA_DRY_RUN_ENV, NULL);
     set_env(MASA_CC_ENV, NULL);
+    set_env(MASA_REAL_CC_ENV, NULL);
+    set_env(MASA_SHIM_DIR_ENV, NULL);
+    set_env(MASA_SHIM_TARGET_ENV, NULL);
+    set_env("PATH", g_original_path);
 }
 
 /* ------------------------------------------------------------------ */
@@ -358,11 +368,13 @@ static void test_dry_run_is_exact(void)
     set_env(MASA_DRY_RUN_ENV, "1");
     set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
     set_env(MASA_SDK_PATH_ENV, "/sdk");
+    /* A bare MASA_CC name is honoured verbatim, keeping the output exact. */
+    set_env(MASA_CC_ENV, "myclang");
 
     rc = run_masa(argv, out, sizeof(out), NULL, 0);
     CHECK(rc == 0);
     snprintf(expected, sizeof(expected),
-             "clang -c foo.c -target arm64-apple-darwin -fuse-ld=lld -isysroot /sdk\n");
+             "myclang -c foo.c -target arm64-apple-darwin -fuse-ld=lld -isysroot /sdk\n");
     CHECK_STREQ(out, expected);
 
     reset_masa_env();
@@ -736,12 +748,513 @@ static void test_cc_missing_compiler(void)
     reset_masa_env();
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Milestone 2 helpers                                                */
+/* ------------------------------------------------------------------ */
+
+/* Path of the real masa binary sitting next to this test executable. */
+static char *masa_bin_path(void)
+{
+    char self[4096];
+    char *slash;
+    ssize_t n;
+    size_t len;
+
+    n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) {
+        return NULL;
+    }
+    self[n] = '\0';
+
+    slash = strrchr(self, '/');
+    if (slash == NULL) {
+        return NULL;
+    }
+    *slash = '\0';
+
+    len = strlen(self) + strlen("/masa") + 1;
+    {
+        char *out = malloc(len);
+        if (out == NULL) {
+            return NULL;
+        }
+        snprintf(out, len, "%s/masa", self);
+        return out;
+    }
+}
+
+static int is_symlink_to(const char *path, const char *target)
+{
+    char buf[4096];
+    struct stat st;
+    ssize_t n;
+
+    if (lstat(path, &st) != 0 || !S_ISLNK(st.st_mode)) {
+        return 0;
+    }
+    n = readlink(path, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return 0;
+    }
+    buf[n] = '\0';
+    return strcmp(buf, target) == 0;
+}
+
+static int write_file(const char *path, const char *contents)
+{
+    FILE *fp = fopen(path, "w");
+
+    if (fp == NULL) {
+        return -1;
+    }
+    fputs(contents, fp);
+    fclose(fp);
+    return 0;
+}
+
+static int read_magic(const char *path, unsigned char magic[4])
+{
+    FILE *fp = fopen(path, "rb");
+    size_t got;
+
+    if (fp == NULL) {
+        return -1;
+    }
+    got = fread(magic, 1, 4, fp);
+    fclose(fp);
+    return (got == 4) ? 0 : -1;
+}
+
+static void remove_tree(const char *dir)
+{
+    DIR *d = opendir(dir);
+    struct dirent *ent;
+
+    if (d != NULL) {
+        while ((ent = readdir(d)) != NULL) {
+            char child[4096];
+
+            if (strcmp(ent->d_name, ".") == 0 ||
+                strcmp(ent->d_name, "..") == 0) {
+                continue;
+            }
+            if (snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name) <
+                (int)sizeof(child)) {
+                unlink(child);
+            }
+        }
+        closedir(d);
+    }
+    rmdir(dir);
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 2: argv[0] dispatch                                      */
+/* ------------------------------------------------------------------ */
+
+static void test_argv0_dispatch_sys(void)
+{
+    char *argv_uname_s[] = {"/some/dir/uname", "-s", NULL};
+    char *argv_uname_m[] = {"/some/dir/uname", "-m", NULL};
+    char *argv_sw[] = {"/some/dir/sw_vers", "-productName", NULL};
+    char *argv_xcrun[] = {"/some/dir/xcrun", "--show-sdk-path", NULL};
+    char out[256];
+    int rc;
+
+    reset_masa_env();
+
+    rc = run_masa(argv_uname_s, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_STREQ(out, "Darwin\n");
+
+    rc = run_masa(argv_uname_m, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_STREQ(out, "arm64\n");
+
+    rc = run_masa(argv_sw, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_STREQ(out, MASA_SW_PRODUCT_NAME "\n");
+
+    rc = run_masa(argv_xcrun, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_STREQ(out, MASA_DEFAULT_SDK_PATH "\n");
+}
+
+static void test_argv0_dispatch_cc(void)
+{
+    char *argv_cc[] = {"/some/dir/cc", "-c", "foo.c", NULL};
+    char *argv_clang[] = {"/some/dir/clang", "-c", "foo.c", NULL};
+    char *argv_gcc[] = {"/some/dir/gcc", "-c", "foo.c", NULL};
+    char out[1024];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+
+    rc = run_masa(argv_cc, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "clang -c foo.c");
+    CHECK_CONTAINS(out, "-target " MASA_DEFAULT_TARGET);
+    CHECK_CONTAINS(out, "-fuse-ld=lld");
+
+    rc = run_masa(argv_clang, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "clang -c foo.c");
+
+    rc = run_masa(argv_gcc, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "clang -c foo.c");
+
+    reset_masa_env();
+}
+
+static void test_argv0_non_shim_routes(void)
+{
+    char *argv_version[] = {"/usr/local/bin/masa", "version", NULL};
+    char *argv_unknown[] = {"/usr/local/bin/masa", "bogus", NULL};
+    char out[1024];
+    char err[2048];
+    int rc;
+
+    reset_masa_env();
+
+    rc = run_masa(argv_version, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "masa " MASA_VERSION);
+
+    rc = run_masa(argv_unknown, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "unknown subcommand");
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 2: init-shims and exec                                   */
+/* ------------------------------------------------------------------ */
+
+static void test_init_shims_creates_links(void)
+{
+    char dir[] = "/tmp/masa_shims_XXXXXX";
+    char path[4096];
+    char *argv[4];
+    char out[512];
+    size_t i;
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_SHIM_TARGET_ENV, "/bin/true");
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "init-shims";
+    argv[2] = dir;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+
+    for (i = 0; masa_shim_tools[i] != NULL; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, masa_shim_tools[i]);
+        CHECK(is_symlink_to(path, "/bin/true"));
+    }
+
+    /* A second run must refresh the links, not fail. */
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_init_shims_missing_dir(void)
+{
+    char *argv[] = {"masa", "init-shims", NULL};
+    char err[256];
+    int rc;
+
+    reset_masa_env();
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing directory");
+}
+
+static void test_exec_sets_environment(void)
+{
+    char *argv[6];
+    char out[2048];
+    char err[2048];
+    char *masa_bin;
+    int rc;
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP %s is not built\n", (masa_bin != NULL) ? masa_bin : "masa");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "sh";
+    argv[3] = "-c";
+    argv[4] = "echo real=$MASA_REAL_CC; echo dir=$MASA_SHIM_DIR; command -v cc";
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "real=/");
+    CHECK_CONTAINS(out, "dir=/");
+    CHECK_CONTAINS(out, "masa-shims-");
+
+    /* The temporary shim directory must be cleaned up afterwards. */
+    {
+        const char *dir = strstr(out, "dir=");
+        if (dir != NULL) {
+            char shim_dir[4096];
+            size_t len = 0;
+            const char *start = dir + 4;
+            const char *nl = strchr(start, '\n');
+            if (nl != NULL) {
+                len = (size_t)(nl - start);
+                if (len < sizeof(shim_dir)) {
+                    memcpy(shim_dir, start, len);
+                    shim_dir[len] = '\0';
+                    CHECK(access(shim_dir, F_OK) != 0);
+                }
+            }
+        }
+    }
+
+    free(masa_bin);
+    reset_masa_env();
+}
+
+static void test_exec_missing_command(void)
+{
+    char *argv[] = {"masa", "exec", NULL};
+    char err[256];
+    int rc;
+
+    reset_masa_env();
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing command");
+}
+
+static void test_exec_make_integration(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    char dir[] = "/tmp/masa_make_XXXXXX";
+    char src[4096];
+    char mk[4096];
+    char obj[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char magic[4];
+    char *argv[8];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("make")) {
+        printf("  SKIP make is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+
+    snprintf(src, sizeof(src), "%s/hello.c", dir);
+    snprintf(mk, sizeof(mk), "%s/Makefile", dir);
+    snprintf(obj, sizeof(obj), "%s/hello.o", dir);
+
+    if (write_file(src, "int masa_hello(void) { return 42; }\n") != 0 ||
+        write_file(mk,
+                   "all: hello.o\n"
+                   "\n"
+                   "hello.o: hello.c\n"
+                   "\t$(CC) -c hello.c -o hello.o\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write test inputs\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    /* make's default $(CC) is `cc`, which must hit the Masa shim. */
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "make";
+    argv[3] = "-C";
+    argv[4] = dir;
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  make stdout: %s\n  make stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+
+    if (read_magic(obj, magic) != 0) {
+        fprintf(stderr, "  FAIL no object file produced at %s\n", obj);
+        g_failed++;
+    } else {
+        CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+    }
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+
+/*
+ * The critical safety property: when the shim directory is first on PATH,
+ * `masa cc` must not resolve back to itself.  With no real compiler
+ * reachable it must fail cleanly instead of recursing.
+ */
+static void test_cc_avoids_recursion(void)
+{
+    char dir[] = "/tmp/masa_recurse_XXXXXX";
+    char *argv[] = {"masa", "cc", "-c", "foo.c", NULL};
+    char *masa_bin;
+    char err[1024];
+    int rc;
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+
+    /* A shim farm whose only compiler is Masa itself. */
+    if (masa_make_shims(dir, masa_bin) != 0) {
+        fprintf(stderr, "  FAIL cannot create shim farm\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_SHIM_DIR_ENV, dir);
+    set_env("PATH", dir); /* nothing else reachable */
+    set_env(MASA_DRY_RUN_ENV, "1");
+
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "cannot find a host compiler");
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/*
+ * When MASA_REAL_CC points outside the shim directory, the wrapper must
+ * use exactly that compiler even though the shim directory is first on
+ * PATH.
+ */
+static void test_cc_honours_real_cc_over_shims(void)
+{
+    char dir[] = "/tmp/masa_realcc_XXXXXX";
+    char *argv[] = {"masa", "cc", "-c", "foo.c", NULL};
+    char out[1024];
+    char *masa_bin;
+    int rc;
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0 ||
+        !tool_available("clang")) {
+        printf("  SKIP clang or the masa binary is unavailable\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    if (masa_make_shims(dir, masa_bin) != 0) {
+        fprintf(stderr, "  FAIL cannot create shim farm\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_SHIM_DIR_ENV, dir);
+    set_env("PATH", dir); /* only Masa shims are on PATH */
+    set_env(MASA_REAL_CC_ENV, "/usr/bin/clang");
+    set_env(MASA_DRY_RUN_ENV, "1");
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "/usr/bin/clang -c foo.c");
+    CHECK(strstr(out, dir) == NULL);
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
 int main(void)
 {
+    const char *path = getenv("PATH");
+
+    g_original_path = (path != NULL) ? strdup(path) : NULL;
+
     printf("masa %s test suite\n\n", MASA_VERSION);
 
     RUN(test_build_cc_args_sequence);
@@ -767,12 +1280,27 @@ int main(void)
     RUN(test_version);
     RUN(test_help_and_unknown);
 
+    RUN(test_argv0_dispatch_sys);
+    RUN(test_argv0_dispatch_cc);
+    RUN(test_argv0_non_shim_routes);
+
+    RUN(test_init_shims_creates_links);
+    RUN(test_init_shims_missing_dir);
+    RUN(test_exec_sets_environment);
+    RUN(test_exec_missing_command);
+    RUN(test_exec_make_integration);
+
+    RUN(test_cc_avoids_recursion);
+    RUN(test_cc_honours_real_cc_over_shims);
+
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);
     RUN(test_cc_missing_compiler);
 
     printf("\n%d tests run, %d failed, %d skipped\n",
            g_run, g_failed, g_skipped);
+
+    free(g_original_path);
 
     return (g_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

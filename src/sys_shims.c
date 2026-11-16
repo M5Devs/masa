@@ -114,6 +114,18 @@ static int shim_xcrun(int argc, char *const argv[])
     return 1;
 }
 
+/* Basename of a path, so a shim invoked as /dir/uname still matches. */
+static const char *base_name(const char *path)
+{
+    const char *slash;
+
+    if (path == NULL) {
+        return "";
+    }
+    slash = strrchr(path, '/');
+    return (slash != NULL) ? slash + 1 : path;
+}
+
 int masa_sys_dispatch(int argc, char *const argv[])
 {
     const char *command;
@@ -123,7 +135,7 @@ int masa_sys_dispatch(int argc, char *const argv[])
         return 1;
     }
 
-    command = argv[0];
+    command = base_name(argv[0]);
     if (strcmp(command, "uname") == 0) {
         return shim_uname(argc, argv);
     }

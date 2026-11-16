@@ -13,10 +13,10 @@ BIN     := build/masa
 OBJDIR  := build
 TESTBIN := build/test_masa
 
-SRC     := src/main.c src/cc_wrapper.c src/sys_shims.c src/platform_linux.c
+SRC     := src/main.c src/cc_wrapper.c src/sys_shims.c src/exec.c src/platform_linux.c
 OBJ     := $(SRC:src/%.c=$(OBJDIR)/%.o)
 
-TEST_SRC := tests/test_masa.c src/main.c src/cc_wrapper.c src/sys_shims.c src/platform_linux.c
+TEST_SRC := tests/test_masa.c src/main.c src/cc_wrapper.c src/sys_shims.c src/exec.c src/platform_linux.c
 TEST_CFLAGS := -DMASA_NO_MAIN
 
 .PHONY: all test clean run
@@ -35,7 +35,7 @@ $(TESTBIN): $(TEST_SRC) include/masa.h | $(OBJDIR)
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
-test: $(TESTBIN)
+test: $(TESTBIN) $(BIN)
 	./$(TESTBIN)
 
 run: $(BIN)
