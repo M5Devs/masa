@@ -9,20 +9,23 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 10 (v1.0.0): distribution. `masa pack` turns a `.app` bundle into a
-distributable `.ipa` (a ZIP of `Payload/<App>.app`) or `.dmg` (a UDIF disk
-image), and the Homebrew builder now runs single-string `system "..."` install
-steps through `/bin/sh -c` the way Homebrew does. This sits on the Milestone 9
-local independence (`masa doctor`, `make dist`, self-hosted CI, the Windows
-ConPTY backend), the Milestone 8 standalone GUI terminal (`masa-term`, an
-optional SDL2 + SDL2_ttf + libvterm front end over a real PTY), the Milestone 7
-Swift toolchain support and Android cross-compilation, the Milestone 6
-interactive `masa shell` and portable host-services layer, the Milestone 5
-Homebrew formula linter and builder (`masa brew`), the Milestone 4 Xcode
-`.xcodeproj` builder and `codesign` shim, the Milestone 3 full Mach-O
-executable linking, toolchain shims and `masa sdk`, and the Milestone 2
-`argv[0]` dispatch and `masa exec` environment runner, which in turn rest on
-the Milestone 1 `cc` wrapper and `sys` shims.
+Milestone 11 (v1.1.0): the Masa Danroot loader. `masa run` (aliased as
+`masa danroot`) executes a Mach-O `MH_EXECUTE` binary built by `masa cc`
+directly on a POSIX host - a clean-room, in-process reimplementation of the
+`dyld` steps a self-contained executable needs (segment mapping, chained
+fixups, a `libSystem` shim, the `LC_MAIN` entry call) - so a cross-compiled
+Darwin program can be built and run in one place. This sits on the Milestone
+10 distribution work (`masa pack` to `.ipa`/`.dmg`, the Homebrew single-string
+`system` fix), the Milestone 9 local independence (`masa doctor`, `make dist`,
+self-hosted CI, the Windows ConPTY backend), the Milestone 8 standalone GUI
+terminal (`masa-term`, an optional SDL2 + SDL2_ttf + libvterm front end over a
+real PTY), the Milestone 7 Swift toolchain support and Android
+cross-compilation, the Milestone 6 interactive `masa shell` and portable
+host-services layer, the Milestone 5 Homebrew formula linter and builder
+(`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim,
+the Milestone 3 full Mach-O executable linking, toolchain shims and `masa
+sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec` environment
+runner, which in turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
 
 ## Requirements
 
@@ -104,6 +107,9 @@ masa brew build <formula.rb> --source <dir> [--prefix <dir>]
 masa pack --ipa <App.app> -o <out.ipa>
 masa pack --dmg <App.app> -o <out.dmg>
                               Package a .app as an .ipa or a .dmg
+masa run <binary> [args...]   Run a Mach-O executable on this host
+masa danroot <binary> [args...]
+                              Alias for `masa run` (the Danroot loader)
 masa version                  Print the Masa version
 masa help                     Show the usage message
 ```
@@ -456,6 +462,61 @@ masa: pack: unknown option '--bogus'
 masa: pack: 'Demo.app' is not a directory
 ```
 
+### `masa run` / `masa danroot`
+
+`masa run` executes a Mach-O `MH_EXECUTE` binary built by `masa cc` directly
+on a POSIX host (Linux, Android/Termux), without a virtual machine, a kernel
+module or a full Darwin userland. `masa danroot` is an exact alias.
+
+```sh
+masa sdk init-stub /opt/masa/sdk
+MASA_SDK_PATH=/opt/masa/sdk masa cc hello.c -o hello
+masa run ./hello alpha beta
+# hello danroot, argc=3
+# arg[1]=alpha
+# arg[2]=beta
+```
+
+This is the **Masa Danroot** loader, a clean-room (GPLv3) reimplementation of
+the parts of `dyld` a self-contained executable needs:
+
+- it reads the `LC_SEGMENT_64` load commands and maps each segment with
+  `mmap()`, sliding them to whatever base the kernel returns;
+- it applies `LC_DYLD_CHAINED_FIXUPS` (`ptr_fmt = 2`, `DYLD_CHAINED_PTR_64`),
+  rewriting rebases to the real load address and resolving binds;
+- it resolves the image's imports against a small clean-room `libSystem`
+  shim (see the symbol list below);
+- it calls the `LC_MAIN` entry point with `(argc, argv, envp, apple)` and
+  returns the value it produces as the process exit status.
+
+A Masa-linked program contains no raw `syscall` instructions - every libc
+call goes through the shim - so no trap interception is needed and the loader
+runs entirely in-process. It is architecture-matched: an `x86_64` host runs
+`x86_64` images and an `arm64` host runs `arm64` images. Running an image for
+the other architecture is rejected cleanly:
+
+```
+masa: run: architecture mismatch: './hello' is arm64, host is x86_64
+```
+
+The shim covers the core C symbols a program built against the stub SDK can
+reference: `printf`, `puts`, `putchar`, `fprintf`, `malloc`, `calloc`,
+`realloc`, `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `memcpy`,
+`memset`, `memmove`, `atoi`, `getenv`, `write`, `read`, `open`, `close`,
+`abort` and `exit`. An `exit()` call unwinds back to the loader (so cleanup
+still runs) and its status becomes the process exit code.
+
+Errors are reported clearly and never crash:
+
+```
+masa: run: cannot open './nope': No such file or directory
+masa: run: './notmacho' is not a 64-bit Mach-O image
+masa: run: './app' has no LC_MAIN entry point
+```
+
+`masa run` is available on POSIX hosts; on Windows the subcommand reports
+that it is POSIX-only, so the MinGW cross-build stays clean.
+
 ### `masa sys`
 
 Shims the platform queries that build systems use to detect macOS:
@@ -542,6 +603,7 @@ src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
 src/brew.c             Homebrew formula linter and builder
 src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
+src/danroot.c          Masa Danroot: the Mach-O loader behind `masa run`
 src/exec.c             init-shims, exec, shell and the shim environment
 src/doctor.c           masa doctor: local cross-build readiness report
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
@@ -603,8 +665,15 @@ word to `execvp` but a command with spaces or shell syntax through `/bin/sh`;
 a ZIP (`PK\x03\x04`) whose entries include `Payload/DemoApp.app/` and the
 `Contents/MacOS/` executable, `masa pack --dmg` is checked to end in a `koly`
 UDIF trailer (version 4, header size 512) wrapping an XML plist with a `blkx`
-block table, and the pack error paths are checked to exit with status 2. A
-separate test compiles every source for Android with the NDK clang
+block table, and the pack error paths are checked to exit with status 2. The
+Milestone 11 tests build a real Mach-O executable with `masa cc` for the host
+architecture and run it through both `masa run` and `masa danroot`, checking
+the program's `printf` output, its `argc`/`argv` handling and a `42` exit
+status; a second program calls `exit()` and its status is checked to be
+honoured; a foreign-architecture binary is built and `masa run` is asserted to
+reject it with an `architecture mismatch` message; and the non-Mach-O,
+missing-file and missing-argument paths are checked to exit non-zero without
+leaking. A separate test compiles every source for Android with the NDK clang
 (`ANDROID_CC`) when one is available, and skips otherwise. Tests that need
 `clang` or `make` skip themselves when the tool is absent.
 

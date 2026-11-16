@@ -28,7 +28,7 @@ endif
 
 HEADERS := include/masa.h include/masa_compat.h include/masa_pty.h
 
-SRC     := src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/doctor.c src/pack.c $(PLATFORM_SRC)
+SRC     := src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/doctor.c src/pack.c src/danroot.c $(PLATFORM_SRC)
 OBJ     := $(SRC:src/%.c=$(OBJDIR)/%.o)
 
 TEST_SRC := tests/test_masa.c $(SRC)

@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.0.0"
+#define MASA_VERSION "1.1.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -493,6 +493,22 @@ int masa_doctor_main(int argc, char *const argv[]);
  * success and non-zero on error.
  */
 int masa_pack_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Mach-O runner (src/danroot.c)                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * `masa run <binary> [args...]` and its alias `masa danroot` - load a
+ * 64-bit Mach-O MH_EXECUTE image built by `masa cc` into the current
+ * process and run it, resolving its imports against a clean-room
+ * libSystem shim.  Supported on POSIX hosts (Linux, Android/Termux);
+ * on Windows it reports that the feature is POSIX-only.
+ *
+ * Returns the loaded program's exit status, or a non-zero loader error
+ * code when the image cannot be loaded.
+ */
+int masa_danroot_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* CLI router (src/main.c)                                            */

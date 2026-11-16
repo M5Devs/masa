@@ -44,6 +44,9 @@ static void print_usage(FILE *out, const char *prog)
             "  %s pack --ipa <App.app> -o <out.ipa>\n"
             "  %s pack --dmg <App.app> -o <out.dmg>\n"
             "                              Package an .app as an .ipa or a .dmg\n"
+            "  %s run <binary> [args...]   Run a Mach-O executable on this host\n"
+            "  %s danroot <binary> [args...]\n"
+            "                              Alias for `run` (Masa Danroot loader)\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -64,7 +67,7 @@ static void print_usage(FILE *out, const char *prog)
             MASA_VERSION,
             prog, prog, prog, prog, prog, prog, prog, prog,
             prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog,
+            prog, prog, prog, prog,
             MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
@@ -203,6 +206,13 @@ int masa_main(int argc, char *const argv[])
     }
     if (strcmp(command, "pack") == 0) {
         return masa_pack_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "run") == 0 || strcmp(command, "danroot") == 0) {
+        if (argc < 3 || argv[2] == NULL) {
+            fprintf(stderr, "masa: %s: missing Mach-O executable\n", command);
+            return 2;
+        }
+        return masa_danroot_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

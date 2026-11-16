@@ -59,6 +59,10 @@ static int write_text_file(const char *path, const char *text)
  * names a normal C program references, written out here rather than
  * copied from any SDK.  install-name follows the convention a real
  * libSystem advertises so linked images record a plausible load command.
+ *
+ * The exported set is exactly what the Danroot loader (src/danroot.c)
+ * can resolve at run time, so a program linked against this stub can be
+ * executed immediately with `masa run`.
  */
 static const char *libsystem_tbd(void)
 {
@@ -71,10 +75,10 @@ static const char *libsystem_tbd(void)
         "compatibility-version: 1.0\n"
         "exports:\n"
         "  - targets:         [ arm64-macos, x86_64-macos ]\n"
-        "    symbols:         [ _exit, _abort, _malloc, _free, _calloc,"
-        " _realloc, _memcpy, _memset, _memmove, _strlen, _strcmp, _strncmp,"
-        " _printf, _fprintf, _puts, _putchar, _write, _read, _open, _close,"
-        " dyld_stub_binder ]\n"
+        "    symbols:         [ _printf, _puts, _putchar, _malloc, _calloc,"
+        " _realloc, _free, _strlen, _strcmp, _strncmp, _strcpy, _memcpy,"
+        " _memset, _memmove, _atoi, _getenv, _exit, _fprintf, _write, _read,"
+        " _open, _close, dyld_stub_binder ]\n"
         "...\n";
 }
 
@@ -127,6 +131,8 @@ static const char *stdlib_h(void)
         "void *calloc(size_t count, size_t size);\n"
         "void *realloc(void *ptr, size_t size);\n"
         "void free(void *ptr);\n"
+        "int atoi(const char *s);\n"
+        "char *getenv(const char *name);\n"
         "\n"
         "#endif /* MASA_STUB_STDLIB_H */\n";
 }
@@ -145,6 +151,7 @@ static const char *string_h(void)
         "size_t strlen(const char *s);\n"
         "int strcmp(const char *a, const char *b);\n"
         "int strncmp(const char *a, const char *b, size_t n);\n"
+        "char *strcpy(char *dst, const char *src);\n"
         "\n"
         "#endif /* MASA_STUB_STRING_H */\n";
 }

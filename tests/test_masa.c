@@ -3598,6 +3598,327 @@ static void test_pack_errors(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 11: `masa run` / `masa danroot` (the Danroot loader)      */
+/* ------------------------------------------------------------------ */
+
+/* The Mach-O cputype a Masa binary for the host must carry. */
+static const char *host_apple_target(void)
+{
+#if defined(__x86_64__)
+    return "x86_64-apple-darwin";
+#elif defined(__aarch64__) || defined(__arm64__)
+    return "arm64-apple-darwin";
+#else
+    return NULL;
+#endif
+}
+
+/* The cputype a foreign-architecture binary carries, for mismatch tests. */
+static const char *foreign_apple_target(void)
+{
+#if defined(__x86_64__)
+    return "arm64-apple-darwin";
+#elif defined(__aarch64__) || defined(__arm64__)
+    return "x86_64-apple-darwin";
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Compile source into a Mach-O executable with `masa cc`, writing into a
+ * fresh stub SDK at <dir>/sdk.  Returns 0 on success.
+ */
+static int build_macho(const char *dir, const char *target,
+                       const char *source, const char *exe)
+{
+    char sdk[4096];
+    char src[4096];
+    char *argv[8];
+    char out[1024];
+    char err[4096];
+    int rc;
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/prog.c", dir);
+
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        return -1;
+    }
+    if (write_file(src, source) != 0) {
+        fprintf(stderr, "  FAIL cannot write %s\n", src);
+        g_failed++;
+        return -1;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[0] = "masa";
+    argv[1] = "cc";
+    argv[2] = src;
+    argv[3] = "-o";
+    argv[4] = (char *)exe;
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  cc stderr (%s): %s\n", target, err);
+    }
+    return rc;
+}
+
+/*
+ * End-to-end: build a real Mach-O executable that uses printf, malloc,
+ * free and argc/argv, then run it through `masa run` and confirm the
+ * output, the argument handling and the exit status.
+ */
+static void danroot_run(const char *subcommand)
+{
+    static const char *source =
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "#include <string.h>\n"
+        "int main(int argc, char **argv) {\n"
+        "    char *buf = (char *)malloc(32);\n"
+        "    int i;\n"
+        "    strcpy(buf, \"danroot\");\n"
+        "    printf(\"hello %s, argc=%d\\n\", buf, argc);\n"
+        "    for (i = 1; i < argc; i++) {\n"
+        "        printf(\"arg[%d]=%s\\n\", i, argv[i]);\n"
+        "    }\n"
+        "    free(buf);\n"
+        "    return 42;\n"
+        "}\n";
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_run_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[8];
+    int rc;
+
+    if (target == NULL) {
+        printf("  SKIP unsupported host architecture\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(exe, sizeof(exe), "%s/prog", dir);
+
+    if (build_macho(dir, target, source, exe) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* `masa run` (or its alias) with two program arguments. */
+    argv[0] = "masa";
+    argv[1] = (char *)subcommand;
+    argv[2] = exe;
+    argv[3] = "alpha";
+    argv[4] = "beta";
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 42) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 42);
+    CHECK_CONTAINS(out, "hello danroot, argc=3");
+    CHECK_CONTAINS(out, "arg[1]=alpha");
+    CHECK_CONTAINS(out, "arg[2]=beta");
+
+    /* With no extra arguments argc is 1 and argv[0] is the image path. */
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 42);
+    CHECK_CONTAINS(out, "hello danroot, argc=1");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_run_executes_macho(void)
+{
+    danroot_run("run");
+}
+
+static void test_danroot_alias_executes_macho(void)
+{
+    danroot_run("danroot");
+}
+
+/* A program that calls exit() must return that status, not run on. */
+static void test_run_honours_exit(void)
+{
+    static const char *source =
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "int main(void) {\n"
+        "    printf(\"before exit\\n\");\n"
+        "    exit(7);\n"
+        "    printf(\"unreachable\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_run_exit_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(exe, sizeof(exe), "%s/prog", dir);
+
+    if (build_macho(dir, target, source, exe) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 7);
+    CHECK_CONTAINS(out, "before exit");
+    CHECK(strstr(out, "unreachable") == NULL);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* An image built for a different architecture must be rejected cleanly. */
+static void test_run_rejects_cputype_mismatch(void)
+{
+    static const char *source = "int main(void) { return 0; }\n";
+    const char *host = host_apple_target();
+    const char *foreign = foreign_apple_target();
+    char dir[] = "/tmp/masa_run_arch_XXXXXX";
+    char exe[4096];
+    char out[1024];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+    if (host == NULL || foreign == NULL) {
+        printf("  SKIP unsupported host architecture\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(exe, sizeof(exe), "%s/prog", dir);
+
+    if (build_macho(dir, foreign, source, exe) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "architecture mismatch");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* Non-Mach-O, truncated and missing inputs must fail without crashing. */
+static void test_run_rejects_bad_input(void)
+{
+    char dir[] = "/tmp/masa_run_bad_XXXXXX";
+    char path[4096];
+    char out[1024];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    /* Plain text: not a Mach-O at all. */
+    snprintf(path, sizeof(path), "%s/notmacho", dir);
+    if (write_file(path,
+                   "this is not a Mach-O image, just some text padding\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write %s\n", path);
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = path;
+    argv[3] = NULL;
+
+    reset_masa_env();
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "not a 64-bit Mach-O image");
+
+    /* A nonexistent path. */
+    snprintf(path, sizeof(path), "%s/does-not-exist", dir);
+    argv[2] = path;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "cannot open");
+
+    /* Missing argument. */
+    argv[2] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing Mach-O executable");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+
+/* ------------------------------------------------------------------ */
 /* Milestone 6: `masa shell` and the host-services layer               */
 /* ------------------------------------------------------------------ */
 
@@ -4224,7 +4545,7 @@ static void test_android_ndk_compile(void)
         "src/main.c", "src/cc_wrapper.c", "src/swift_wrapper.c",
         "src/sys_shims.c", "src/tool_shims.c", "src/sdk.c",
         "src/xcodeproj.c", "src/brew.c", "src/pack.c", "src/exec.c",
-        "src/doctor.c",
+        "src/doctor.c", "src/danroot.c",
         "src/platform_posix.c"
     };
     const char *ndk_cc = getenv("ANDROID_CC");
@@ -4536,6 +4857,12 @@ int main(void)
     RUN(test_pack_ipa);
     RUN(test_pack_dmg);
     RUN(test_pack_errors);
+
+    RUN(test_run_executes_macho);
+    RUN(test_danroot_alias_executes_macho);
+    RUN(test_run_honours_exit);
+    RUN(test_run_rejects_cputype_mismatch);
+    RUN(test_run_rejects_bad_input);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);
