@@ -17,6 +17,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -3627,16 +3628,20 @@ static const char *foreign_apple_target(void)
 
 /*
  * Compile source into a Mach-O executable with `masa cc`, writing into a
- * fresh stub SDK at <dir>/sdk.  Returns 0 on success.
+ * fresh stub SDK at <dir>/sdk.  extra, when non-NULL, is appended to the
+ * compiler command line (used to force classic dyld-info fixups).
+ * Returns 0 on success.
  */
-static int build_macho(const char *dir, const char *target,
-                       const char *source, const char *exe)
+static int build_macho_extra(const char *dir, const char *target,
+                             const char *source, const char *exe,
+                             const char *extra)
 {
     char sdk[4096];
     char src[4096];
     char *argv[8];
     char out[1024];
     char err[4096];
+    int n = 0;
     int rc;
 
     snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
@@ -3656,18 +3661,72 @@ static int build_macho(const char *dir, const char *target,
     set_env(MASA_SDK_PATH_ENV, sdk);
     set_env(MASA_TARGET_ENV, target);
 
-    argv[0] = "masa";
-    argv[1] = "cc";
-    argv[2] = src;
-    argv[3] = "-o";
-    argv[4] = (char *)exe;
-    argv[5] = NULL;
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = (char *)exe;
+    if (extra != NULL) {
+        argv[n++] = (char *)extra;
+    }
+    argv[n] = NULL;
 
     rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
     if (rc != 0) {
         fprintf(stderr, "  cc stderr (%s): %s\n", target, err);
     }
     return rc;
+}
+
+static int build_macho(const char *dir, const char *target,
+                       const char *source, const char *exe)
+{
+    return build_macho_extra(dir, target, source, exe, NULL);
+}
+
+/* Return 1 when the Mach-O at path carries load command cmd. */
+static int macho_has_command(const char *path, uint32_t want)
+{
+    unsigned char buf[32];
+    FILE *fp = fopen(path, "rb");
+    uint32_t ncmds;
+    uint32_t i;
+    long off;
+
+    if (fp == NULL) {
+        return 0;
+    }
+    if (fread(buf, 1, sizeof(buf), fp) != sizeof(buf)) {
+        fclose(fp);
+        return 0;
+    }
+    ncmds = (uint32_t)buf[16] | ((uint32_t)buf[17] << 8) |
+            ((uint32_t)buf[18] << 16) | ((uint32_t)buf[19] << 24);
+    off = 32;
+    for (i = 0; i < ncmds; i++) {
+        unsigned char lc[8];
+        uint32_t cmd;
+        uint32_t cmdsize;
+
+        if (fseek(fp, off, SEEK_SET) != 0 ||
+            fread(lc, 1, sizeof(lc), fp) != sizeof(lc)) {
+            break;
+        }
+        cmd = (uint32_t)lc[0] | ((uint32_t)lc[1] << 8) |
+              ((uint32_t)lc[2] << 16) | ((uint32_t)lc[3] << 24);
+        cmdsize = (uint32_t)lc[4] | ((uint32_t)lc[5] << 8) |
+                  ((uint32_t)lc[6] << 16) | ((uint32_t)lc[7] << 24);
+        if (cmdsize < 8) {
+            break;
+        }
+        if (cmd == want) {
+            fclose(fp);
+            return 1;
+        }
+        off += cmdsize;
+    }
+    fclose(fp);
+    return 0;
 }
 
 /*
@@ -3916,6 +3975,73 @@ static void test_run_rejects_bad_input(void)
     remove_tree(dir);
     reset_masa_env();
 }
+
+
+/*
+ * Regression: older ld64.lld (the clang-18 shipped on Ubuntu 24.04) emits
+ * the classic LC_DYLD_INFO_ONLY rebase/bind opcodes instead of
+ * LC_DYLD_CHAINED_FIXUPS.  Without classic-fixup support the loader applied
+ * no relocations and the image jumped to an unslid address and crashed.
+ * `-Wl,-no_fixup_chains` forces that classic layout on any clang, so this
+ * test covers it deterministically; it is skipped if the linker rejects it.
+ */
+static void test_run_classic_dyld_info_fixups(void)
+{
+    static const char *source =
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "int main(int argc, char **argv) {\n"
+        "    printf(\"classic argc=%d\\n\", argc);\n"
+        "    return argc;\n"
+        "}\n";
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_run_classic_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[5];
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(exe, sizeof(exe), "%s/prog", dir);
+
+    if (build_macho_extra(dir, target, source, exe,
+                          "-Wl,-no_fixup_chains") != 0) {
+        printf("  SKIP linker does not support -no_fixup_chains\n");
+        g_skipped++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    /* Confirm the image really carries the classic fixup command. */
+    CHECK(macho_has_command(exe, 0x80000022u)); /* LC_DYLD_INFO_ONLY */
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = "a";
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 2) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 2); /* argc == 2 becomes the exit status */
+    CHECK_CONTAINS(out, "classic argc=2");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
 
 
 /* ------------------------------------------------------------------ */
@@ -4861,6 +4987,7 @@ int main(void)
     RUN(test_run_executes_macho);
     RUN(test_danroot_alias_executes_macho);
     RUN(test_run_honours_exit);
+    RUN(test_run_classic_dyld_info_fixups);
     RUN(test_run_rejects_cputype_mismatch);
     RUN(test_run_rejects_bad_input);
 

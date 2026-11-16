@@ -482,8 +482,11 @@ the parts of `dyld` a self-contained executable needs:
 
 - it reads the `LC_SEGMENT_64` load commands and maps each segment with
   `mmap()`, sliding them to whatever base the kernel returns;
-- it applies `LC_DYLD_CHAINED_FIXUPS` (`ptr_fmt = 2`, `DYLD_CHAINED_PTR_64`),
-  rewriting rebases to the real load address and resolving binds;
+- it applies the image's relocations, whichever format the linker emitted:
+  `LC_DYLD_CHAINED_FIXUPS` (`ptr_fmt = 2`, `DYLD_CHAINED_PTR_64`) or the
+  classic `LC_DYLD_INFO_ONLY` rebase/bind opcodes (older `ld64.lld`, such as
+  the clang-18 on Ubuntu 24.04), rewriting rebases to the real load address
+  and resolving binds;
 - it resolves the image's imports against a small clean-room `libSystem`
   shim (see the symbol list below);
 - it calls the `LC_MAIN` entry point with `(argc, argv, envp, apple)` and

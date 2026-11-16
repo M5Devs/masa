@@ -81,6 +81,7 @@ extern char **environ;
 
 #define DR_LC_SEGMENT_64            0x19u
 #define DR_LC_MAIN                  0x80000028u
+#define DR_LC_DYLD_INFO_ONLY        0x80000022u
 #define DR_LC_DYLD_CHAINED_FIXUPS   0x80000034u
 
 /* dyld_chained_fixups_header.imports_format values. */
@@ -92,6 +93,41 @@ extern char **environ;
 
 /* page_start[] sentinel: no fixups on this page. */
 #define DR_CHAINED_PTR_START_NONE   0xffffu
+
+/* Classic (LC_DYLD_INFO) rebase/bind opcodes. */
+#define DR_REBASE_OPCODE_MASK       0xf0u
+#define DR_REBASE_IMMEDIATE_MASK    0x0fu
+#define DR_REBASE_OPCODE_DONE       0x00u
+#define DR_REBASE_OPCODE_SET_TYPE_IMM 0x10u
+#define DR_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x20u
+#define DR_REBASE_OPCODE_ADD_ADDR_ULEB 0x30u
+#define DR_REBASE_OPCODE_ADD_ADDR_IMM_SCALED 0x40u
+#define DR_REBASE_OPCODE_DO_REBASE_IMM_TIMES 0x50u
+#define DR_REBASE_OPCODE_DO_REBASE_ULEB_TIMES 0x60u
+#define DR_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB 0x70u
+#define DR_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80u
+
+#define DR_BIND_OPCODE_MASK         0xf0u
+#define DR_BIND_IMMEDIATE_MASK      0x0fu
+#define DR_BIND_OPCODE_DONE         0x00u
+#define DR_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 0x10u
+#define DR_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB 0x20u
+#define DR_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM 0x30u
+#define DR_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM 0x40u
+#define DR_BIND_OPCODE_SET_TYPE_IMM 0x50u
+#define DR_BIND_OPCODE_SET_ADDEND_SLEB 0x60u
+#define DR_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70u
+#define DR_BIND_OPCODE_ADD_ADDR_ULEB 0x80u
+#define DR_BIND_OPCODE_DO_BIND        0x90u
+#define DR_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB 0xa0u
+#define DR_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED 0xb0u
+#define DR_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xc0u
+#define DR_BIND_OPCODE_THREADED      0xd0u
+
+/* BIND_TYPE_* (the low nibble of SET_TYPE_IMM for binds). */
+#define DR_BIND_TYPE_POINTER        1u
+#define DR_BIND_TYPE_TEXT_ABSOLUTE32 2u
+#define DR_BIND_TYPE_POINTER32      3u
 
 /* VM protection bits, matching the Mach-O segment initial protection. */
 #define DR_VM_PROT_READ             0x1u
@@ -126,6 +162,50 @@ static uint16_t dr_rd16(const unsigned char *p)
 static uint64_t dr_round_up(uint64_t value, uint64_t align)
 {
     return (value + align - 1) & ~(align - 1);
+}
+
+/* ULEB128 / SLEB128, used by the classic dyld rebase/bind opcodes. */
+static uint64_t dr_uleb128(const unsigned char **p, const unsigned char *end)
+{
+    uint64_t result = 0;
+    unsigned shift = 0;
+
+    while (*p < end) {
+        unsigned char byte = *(*p)++;
+
+        result |= (uint64_t)(byte & 0x7fu) << shift;
+        if ((byte & 0x80u) == 0) {
+            break;
+        }
+        shift += 7;
+        if (shift >= 64) {
+            break;
+        }
+    }
+    return result;
+}
+
+static int64_t dr_sleb128(const unsigned char **p, const unsigned char *end)
+{
+    int64_t result = 0;
+    unsigned shift = 0;
+    unsigned char byte = 0;
+
+    while (*p < end) {
+        byte = *(*p)++;
+        result |= (int64_t)(byte & 0x7fu) << shift;
+        shift += 7;
+        if ((byte & 0x80u) == 0) {
+            break;
+        }
+        if (shift >= 64) {
+            break;
+        }
+    }
+    if (shift < 64 && (byte & 0x40u) != 0) {
+        result |= -((int64_t)1 << shift);
+    }
+    return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -350,6 +430,15 @@ struct dr_image {
     uint64_t text_vmaddr;      /* preferred vmaddr of the lowest segment */
     uint64_t text_fileoff;     /* file offset that maps to text_vmaddr */
     uint64_t entryoff;         /* LC_MAIN file offset of the entry point */
+
+    /* LC_DYLD_INFO_ONLY (classic rebase/bind opcodes); 0 when absent. */
+    int has_dyld_info;
+    uint32_t rebase_off;
+    uint32_t rebase_size;
+    uint32_t bind_off;
+    uint32_t bind_size;
+    uint32_t lazy_bind_off;
+    uint32_t lazy_bind_size;
 };
 
 /*
@@ -407,6 +496,18 @@ static int dr_read_commands(const unsigned char *buf, size_t size,
                 return -1;
             }
             img->entryoff = dr_rd64(buf + off + 8);
+        } else if (cmd == DR_LC_DYLD_INFO_ONLY) {
+            if (cmdsize < 48) {
+                snprintf(err, errcap, "short LC_DYLD_INFO_ONLY");
+                return -1;
+            }
+            img->has_dyld_info  = 1;
+            img->rebase_off     = dr_rd32(buf + off + 8);
+            img->rebase_size    = dr_rd32(buf + off + 12);
+            img->bind_off       = dr_rd32(buf + off + 16);
+            img->bind_size      = dr_rd32(buf + off + 20);
+            img->lazy_bind_off  = dr_rd32(buf + off + 32);
+            img->lazy_bind_size = dr_rd32(buf + off + 36);
         }
 
         off += cmdsize;
@@ -643,6 +744,309 @@ static int dr_apply_fixups(const unsigned char *file, size_t filesize,
 }
 
 /* ------------------------------------------------------------------ */
+/* Classic dyld info (LC_DYLD_INFO_ONLY)                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The segment a classic rebase/bind opcode stream addresses, located by
+ * its index in the load-command order (the same index dyld uses).  The
+ * opcodes carry segment-relative offsets, so a slot's runtime address is
+ * loaded + (segment.vmaddr - image_base) + offset.
+ */
+static const struct dr_segment *dr_seg_at(const struct dr_image *img, int index)
+{
+    if (index < 0 || index >= img->seg_count) {
+        return NULL;
+    }
+    return &img->segs[index];
+}
+
+/*
+ * Runtime address of a (segment index, segment-relative offset) location.
+ * The opcodes carry offsets relative to a segment's preferred vmaddr, so
+ * the runtime address is loaded + (seg.vmaddr - image_base) + offset.
+ */
+static uint64_t dr_seg_addr(const struct dr_image *img, unsigned char *loaded,
+                            int seg_index, uint64_t seg_offset, int *ok)
+{
+    const struct dr_segment *seg = dr_seg_at(img, seg_index);
+
+    if (seg == NULL) {
+        *ok = 0;
+        return 0;
+    }
+    *ok = 1;
+    return (uint64_t)(uintptr_t)loaded +
+           (seg->vmaddr - img->text_vmaddr) + seg_offset;
+}
+
+/* Rebase one pointer slot: add the slide to the value already there. */
+static int dr_apply_one_rebase(const struct dr_image *img,
+                               unsigned char *loaded, int64_t slide,
+                               int seg_index, uint64_t seg_offset,
+                               char *err, size_t errcap)
+{
+    int ok;
+    uint64_t addr = dr_seg_addr(img, loaded, seg_index, seg_offset, &ok);
+    uint64_t *slot;
+
+    if (!ok) {
+        snprintf(err, errcap, "rebase segment %d out of range", seg_index);
+        return -1;
+    }
+    slot = (uint64_t *)(uintptr_t)addr;
+    *slot += (uint64_t)slide;
+    return 0;
+}
+
+/* Bind one pointer slot to the resolved symbol. */
+static int dr_apply_one_bind(const struct dr_image *img, unsigned char *loaded,
+                             int seg_index, uint64_t seg_offset,
+                             const char *name, int bind_type, int64_t addend,
+                             char *err, size_t errcap)
+{
+    int ok;
+    uint64_t addr = dr_seg_addr(img, loaded, seg_index, seg_offset, &ok);
+    void *target;
+
+    if (!ok) {
+        snprintf(err, errcap, "bind segment %d out of range", seg_index);
+        return -1;
+    }
+    if (bind_type != DR_BIND_TYPE_POINTER) {
+        snprintf(err, errcap, "unsupported bind type %d", bind_type);
+        return -1;
+    }
+    target = dr_resolve(name);
+    if (target == NULL) {
+        snprintf(err, errcap, "unresolved symbol '%s'", name);
+        return -1;
+    }
+    *(uint64_t *)(uintptr_t)addr = (uint64_t)(uintptr_t)target + (uint64_t)addend;
+    return 0;
+}
+
+/*
+ * Apply the classic rebase opcodes from LC_DYLD_INFO_ONLY.
+ */
+static int dr_apply_rebases(const struct dr_image *img,
+                            const unsigned char *file, size_t filesize,
+                            unsigned char *loaded, int64_t slide,
+                            char *err, size_t errcap)
+{
+    const unsigned char *p;
+    const unsigned char *end;
+    uint64_t seg_offset = 0;
+    int seg_index = 0;
+
+    if (img->rebase_size == 0) {
+        return 0;
+    }
+    if ((uint64_t)img->rebase_off + img->rebase_size > filesize) {
+        snprintf(err, errcap, "rebase opcodes out of range");
+        return -1;
+    }
+    p = file + img->rebase_off;
+    end = p + img->rebase_size;
+
+    while (p < end) {
+        uint8_t byte = *p++;
+        uint8_t opcode = byte & DR_REBASE_OPCODE_MASK;
+        uint8_t imm = byte & DR_REBASE_IMMEDIATE_MASK;
+        uint64_t count;
+        uint64_t i;
+        int rc = 0;
+
+        switch (opcode) {
+        case DR_REBASE_OPCODE_DONE:
+            return 0;
+        case DR_REBASE_OPCODE_SET_TYPE_IMM:
+            break; /* only pointer rebases are emitted for these images */
+        case DR_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+            seg_index = imm;
+            seg_offset = dr_uleb128(&p, end);
+            break;
+        case DR_REBASE_OPCODE_ADD_ADDR_ULEB:
+            seg_offset += dr_uleb128(&p, end);
+            break;
+        case DR_REBASE_OPCODE_ADD_ADDR_IMM_SCALED:
+            seg_offset += (uint64_t)imm * sizeof(void *);
+            break;
+        case DR_REBASE_OPCODE_DO_REBASE_IMM_TIMES:
+            count = imm;
+            for (i = 0; i < count; i++) {
+                rc = dr_apply_one_rebase(img, loaded, slide, seg_index,
+                                         seg_offset, err, errcap);
+                if (rc != 0) {
+                    return rc;
+                }
+                seg_offset += sizeof(void *);
+            }
+            break;
+        case DR_REBASE_OPCODE_DO_REBASE_ULEB_TIMES:
+            count = dr_uleb128(&p, end);
+            for (i = 0; i < count; i++) {
+                rc = dr_apply_one_rebase(img, loaded, slide, seg_index,
+                                         seg_offset, err, errcap);
+                if (rc != 0) {
+                    return rc;
+                }
+                seg_offset += sizeof(void *);
+            }
+            break;
+        case DR_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB:
+            rc = dr_apply_one_rebase(img, loaded, slide, seg_index, seg_offset,
+                                     err, errcap);
+            if (rc != 0) {
+                return rc;
+            }
+            seg_offset += dr_uleb128(&p, end) + sizeof(void *);
+            break;
+        case DR_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB:
+            count = dr_uleb128(&p, end);
+            {
+                uint64_t skip = dr_uleb128(&p, end);
+                for (i = 0; i < count; i++) {
+                    rc = dr_apply_one_rebase(img, loaded, slide, seg_index,
+                                             seg_offset, err, errcap);
+                    if (rc != 0) {
+                        return rc;
+                    }
+                    seg_offset += skip + sizeof(void *);
+                }
+            }
+            break;
+        default:
+            snprintf(err, errcap, "unsupported rebase opcode %#x", opcode);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Apply a classic bind opcode stream (bind or lazy_bind).  Lazy binds are
+ * resolved eagerly: each entry ends with DONE, so DONE starts the next
+ * entry instead of ending the stream.
+ */
+static int dr_apply_binds(const struct dr_image *img, const unsigned char *file,
+                          size_t filesize, unsigned char *loaded,
+                          uint32_t off, uint32_t size, int lazy,
+                          char *err, size_t errcap)
+{
+    const unsigned char *p;
+    const unsigned char *end;
+    uint64_t seg_offset = 0;
+    int seg_index = 0;
+    int bind_type = DR_BIND_TYPE_POINTER;
+    int64_t addend = 0;
+    char symbol[512];
+
+    if (size == 0) {
+        return 0;
+    }
+    if ((uint64_t)off + size > filesize) {
+        snprintf(err, errcap, "bind opcodes out of range");
+        return -1;
+    }
+    p = file + off;
+    end = p + size;
+    symbol[0] = '\0';
+
+    while (p < end) {
+        uint8_t byte = *p++;
+        uint8_t opcode = byte & DR_BIND_OPCODE_MASK;
+        uint8_t imm = byte & DR_BIND_IMMEDIATE_MASK;
+        uint64_t count;
+        uint64_t i;
+        int rc = 0;
+
+        switch (opcode) {
+        case DR_BIND_OPCODE_DONE:
+            if (lazy) {
+                break; /* end of this entry; the next entry follows */
+            }
+            return 0;
+        case DR_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+            break;
+        case DR_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+            (void)dr_uleb128(&p, end);
+            break;
+        case DR_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+            break;
+        case DR_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
+            size_t n = 0;
+            while (p < end && *p != '\0') {
+                if (n + 1 < sizeof(symbol)) {
+                    symbol[n++] = (char)*p;
+                }
+                p++;
+            }
+            symbol[n] = '\0';
+            if (p < end) {
+                p++; /* skip the trailing NUL */
+            }
+            break;
+        }
+        case DR_BIND_OPCODE_SET_TYPE_IMM:
+            bind_type = imm;
+            break;
+        case DR_BIND_OPCODE_SET_ADDEND_SLEB:
+            addend = dr_sleb128(&p, end);
+            break;
+        case DR_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+            seg_index = imm;
+            seg_offset = dr_uleb128(&p, end);
+            break;
+        case DR_BIND_OPCODE_ADD_ADDR_ULEB:
+            seg_offset += dr_uleb128(&p, end);
+            break;
+        case DR_BIND_OPCODE_DO_BIND:
+            rc = dr_apply_one_bind(img, loaded, seg_index, seg_offset, symbol,
+                                   bind_type, addend, err, errcap);
+            seg_offset += sizeof(void *);
+            break;
+        case DR_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
+            rc = dr_apply_one_bind(img, loaded, seg_index, seg_offset, symbol,
+                                   bind_type, addend, err, errcap);
+            seg_offset += dr_uleb128(&p, end) + sizeof(void *);
+            break;
+        case DR_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
+            rc = dr_apply_one_bind(img, loaded, seg_index, seg_offset, symbol,
+                                   bind_type, addend, err, errcap);
+            seg_offset += (uint64_t)imm * sizeof(void *) + sizeof(void *);
+            break;
+        case DR_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
+            count = dr_uleb128(&p, end);
+            {
+                uint64_t skip = dr_uleb128(&p, end);
+                for (i = 0; i < count; i++) {
+                    rc = dr_apply_one_bind(img, loaded, seg_index, seg_offset,
+                                           symbol, bind_type, addend,
+                                           err, errcap);
+                    if (rc != 0) {
+                        break;
+                    }
+                    seg_offset += skip + sizeof(void *);
+                }
+            }
+            break;
+        case DR_BIND_OPCODE_THREADED:
+            snprintf(err, errcap, "threaded binds are not supported");
+            return -1;
+        default:
+            snprintf(err, errcap, "unsupported bind opcode %#x", opcode);
+            return -1;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+
+/* ------------------------------------------------------------------ */
 /* The loader                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -839,10 +1243,25 @@ static int dr_run(const char *path, int prog_argc, char *const prog_argv[])
                file + seg->fileoff, (size_t)seg->filesize);
     }
 
-    /* Relocations, then the final per-segment protections. */
+    /*
+     * Relocations, then the final per-segment protections.  Modern ld64.lld
+     * emits LC_DYLD_CHAINED_FIXUPS; older ones (e.g. the clang-18 on Ubuntu
+     * 24.04) emit the classic LC_DYLD_INFO_ONLY rebase/bind opcodes instead.
+     * Handle whichever the image carries.
+     */
     if (dr_find_chained_fixups(file, filesize, &dataoff, &datasize) == 0) {
         if (dr_apply_fixups(file, filesize, loaded, slide, dataoff, datasize,
                             err, sizeof(err)) != 0) {
+            fprintf(stderr, "masa: run: '%s': %s\n", path, err);
+            goto done_image;
+        }
+    } else if (img.has_dyld_info) {
+        if (dr_apply_rebases(&img, file, filesize, loaded, slide,
+                             err, sizeof(err)) != 0 ||
+            dr_apply_binds(&img, file, filesize, loaded, img.bind_off,
+                           img.bind_size, 0, err, sizeof(err)) != 0 ||
+            dr_apply_binds(&img, file, filesize, loaded, img.lazy_bind_off,
+                           img.lazy_bind_size, 1, err, sizeof(err)) != 0) {
             fprintf(stderr, "masa: run: '%s': %s\n", path, err);
             goto done_image;
         }
