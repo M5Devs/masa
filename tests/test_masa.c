@@ -246,18 +246,18 @@ static void test_build_cc_args_sequence(void)
 {
     const char *args[16];
     const char *expected[] = {"-target", "arm64-apple-darwin", "-fuse-ld=lld",
-                              "-isysroot", "/sdk"};
+                              "-Qunused-arguments", "-isysroot", "/sdk"};
     int count = 0;
     int i;
     int rc;
 
     rc = masa_build_cc_args("arm64-apple-darwin", "/sdk", args, &count, 16);
     CHECK(rc == 0);
-    CHECK(count == 5);
-    for (i = 0; i < 5; i++) {
+    CHECK(count == 6);
+    for (i = 0; i < 6; i++) {
         CHECK_STREQ(args[i], expected[i]);
     }
-    CHECK(args[5] == NULL);
+    CHECK(args[6] == NULL);
 }
 
 static void test_build_cc_args_appends(void)
@@ -270,13 +270,14 @@ static void test_build_cc_args_appends(void)
     args[1] = "-c";
     rc = masa_build_cc_args("x86_64-apple-darwin", NULL, args, &count, 16);
     CHECK(rc == 0);
-    CHECK(count == 5);
+    CHECK(count == 6);
     CHECK_STREQ(args[0], "clang");
     CHECK_STREQ(args[1], "-c");
     CHECK_STREQ(args[2], "-target");
     CHECK_STREQ(args[3], "x86_64-apple-darwin");
     CHECK_STREQ(args[4], "-fuse-ld=lld");
-    CHECK(args[5] == NULL);
+    CHECK_STREQ(args[5], "-Qunused-arguments");
+    CHECK(args[6] == NULL);
 }
 
 static void test_build_cc_args_empty_sdk_skipped(void)
@@ -287,8 +288,9 @@ static void test_build_cc_args_empty_sdk_skipped(void)
 
     rc = masa_build_cc_args("arm64-apple-darwin", "", args, &count, 16);
     CHECK(rc == 0);
-    CHECK(count == 3);
+    CHECK(count == 4);
     CHECK_STREQ(args[2], "-fuse-ld=lld");
+    CHECK_STREQ(args[3], "-Qunused-arguments");
 }
 
 static void test_build_cc_args_rejects_bad_input(void)
@@ -374,7 +376,8 @@ static void test_dry_run_is_exact(void)
     rc = run_masa(argv, out, sizeof(out), NULL, 0);
     CHECK(rc == 0);
     snprintf(expected, sizeof(expected),
-             "myclang -c foo.c -target arm64-apple-darwin -fuse-ld=lld -isysroot /sdk\n");
+             "myclang -c foo.c -target arm64-apple-darwin -fuse-ld=lld"
+             " -Qunused-arguments -isysroot /sdk\n");
     CHECK_STREQ(out, expected);
 
     reset_masa_env();
@@ -834,13 +837,19 @@ static void remove_tree(const char *dir)
     if (d != NULL) {
         while ((ent = readdir(d)) != NULL) {
             char child[4096];
+            struct stat st;
 
             if (strcmp(ent->d_name, ".") == 0 ||
                 strcmp(ent->d_name, "..") == 0) {
                 continue;
             }
-            if (snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name) <
+            if (snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name) >=
                 (int)sizeof(child)) {
+                continue;
+            }
+            if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+                remove_tree(child);
+            } else {
                 unlink(child);
             }
         }
@@ -1245,6 +1254,450 @@ static void test_cc_honours_real_cc_over_shims(void)
     reset_masa_env();
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Milestone 3 helpers                                                */
+/* ------------------------------------------------------------------ */
+
+/* Read the 16-byte Mach-O 64-bit header: magic (0..3) and filetype (12..15). */
+static int read_macho_header(const char *path, unsigned char magic[4],
+                             unsigned char filetype[4])
+{
+    unsigned char header[16];
+    FILE *fp = fopen(path, "rb");
+    size_t got;
+
+    if (fp == NULL) {
+        return -1;
+    }
+    got = fread(header, 1, sizeof(header), fp);
+    fclose(fp);
+    if (got < sizeof(header)) {
+        return -1;
+    }
+    memcpy(magic, header, 4);
+    memcpy(filetype, header + 12, 4);
+    return 0;
+}
+
+static int file_exists(const char *path)
+{
+    return access(path, F_OK) == 0;
+}
+
+/* True when the stub SDK was written to dir (libSystem.tbd present). */
+static int sdk_is_stubbed(const char *dir)
+{
+    char path[4096];
+
+    snprintf(path, sizeof(path), "%s/%s", dir, MASA_SDK_LIBSYSTEM_RELPATH);
+    return file_exists(path);
+}
+
+/* Run `masa sdk init-stub <dir>` and return 0 on success. */
+static int make_stub_sdk(const char *dir)
+{
+    char *argv[5];
+    char out[1024];
+    char err[1024];
+    int rc;
+
+    argv[0] = "masa";
+    argv[1] = "sdk";
+    argv[2] = "init-stub";
+    argv[3] = (char *)dir;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  init-stub stderr: %s\n", err);
+    }
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 3: sdk                                                   */
+/* ------------------------------------------------------------------ */
+
+static void test_sdk_init_stub(void)
+{
+    char dir[] = "/tmp/masa_sdk_XXXXXX";
+    char path[4096];
+    FILE *fp;
+    char buf[512];
+    size_t got;
+    int rc;
+
+    reset_masa_env();
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    rc = make_stub_sdk(dir);
+    CHECK(rc == 0);
+
+    snprintf(path, sizeof(path), "%s/usr/lib/libSystem.tbd", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/lib/libSystem.B.tbd", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/lib/crt1.o", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/stdlib.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/string.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/stdio.h", dir);
+    CHECK(file_exists(path));
+
+    /* The .tbd must be a TAPI v4 YAML document. */
+    snprintf(path, sizeof(path), "%s/usr/lib/libSystem.tbd", dir);
+    fp = fopen(path, "r");
+    if (fp != NULL) {
+        got = fread(buf, 1, sizeof(buf) - 1, fp);
+        fclose(fp);
+        buf[got] = '\0';
+        CHECK_CONTAINS(buf, "!tapi-tbd");
+        CHECK_CONTAINS(buf, "tbd-version:     4");
+        CHECK_CONTAINS(buf, "install-name:");
+    } else {
+        fprintf(stderr, "  FAIL cannot read %s\n", path);
+        g_failed++;
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_sdk_info(void)
+{
+    char dir[] = "/tmp/masa_sdkinfo_XXXXXX";
+    char *argv_info[] = {"masa", "sdk", "info", NULL};
+    char out[2048];
+    char err[1024];
+    int rc;
+
+    reset_masa_env();
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    /* Point at a directory with no SDK: not ready. */
+    set_env(MASA_SDK_PATH_ENV, dir);
+    rc = run_masa(argv_info, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(out, "missing libSystem.tbd");
+
+    /* After writing the stub it must report ready. */
+    rc = make_stub_sdk(dir);
+    CHECK(rc == 0);
+
+    rc = run_masa(argv_info, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "ready");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_sdk_bad_subcommand(void)
+{
+    char *argv[] = {"masa", "sdk", "bogus", NULL};
+    char err[512];
+    int rc;
+
+    reset_masa_env();
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "unknown subcommand");
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 3: tool shims                                            */
+/* ------------------------------------------------------------------ */
+
+static void test_argv0_dispatch_tools(void)
+{
+    char *argv_ar[] = {"/some/dir/ar", "--version", NULL};
+    char *argv_ranlib[] = {"/some/dir/ranlib", "--version", NULL};
+    char *argv_nm[] = {"/some/dir/nm", "--version", NULL};
+    char *argv_otool[] = {"/some/dir/otool", "--version", NULL};
+    char *argv_ld[] = {"/some/dir/ld", NULL};
+    char out[2048];
+    char err[2048];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    reset_masa_env();
+
+    rc = run_masa(argv_ar, out, sizeof(out), err, sizeof(err));
+    if (rc != 0 && strstr(err, "cannot find") != NULL) {
+        printf("  SKIP LLVM binutils not installed\n");
+        g_skipped++;
+        return;
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "LLVM");
+
+    rc = run_masa(argv_ranlib, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "LLVM");
+
+    rc = run_masa(argv_nm, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "LLVM");
+
+    rc = run_masa(argv_otool, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "LLVM");
+
+    /*
+     * `ld` with no arguments must reach ld64.lld, which rejects the empty
+     * link with a missing-architecture error.
+     */
+    rc = run_masa(argv_ld, NULL, 0, err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "arch");
+}
+
+static void test_cc_link_platform_version(void)
+{
+    char *argv_link[] = {"masa", "cc", "hello.o", "-o", "hello", NULL};
+    char *argv_compile[] = {"masa", "cc", "-c", "hello.c", "-o", "hello.o", NULL};
+    char out[1024];
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_CC_ENV, "myclang");
+
+    /* A link gets an explicit platform version for ld64.lld. */
+    rc = run_masa(argv_link, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "-Wl,-platform_version,macos,");
+
+    /* A compile-only step must not. */
+    rc = run_masa(argv_compile, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK(strstr(out, "-platform_version") == NULL);
+
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 3: full executable linking                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Compile and LINK (no -c) a hello.c against the stub SDK and verify the
+ * result is a Mach-O executable: magic CF FA ED FE and filetype 2.
+ */
+static void link_executable(const char *target)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    char dir[] = "/tmp/masa_link_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char exe[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[8];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/hello.c", dir);
+    snprintf(exe, sizeof(exe), "%s/hello", dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, target);
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    if (write_file(src, "int main(void) { return 0; }\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write %s\n", src);
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "cc";
+    argv[2] = src;
+    argv[3] = "-o";
+    argv[4] = exe;
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  link stderr (%s): %s\n", target, err);
+    }
+    CHECK(rc == 0);
+
+    if (read_macho_header(exe, magic, filetype) != 0) {
+        fprintf(stderr, "  FAIL no executable produced at %s\n", exe);
+        g_failed++;
+    } else {
+        CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+        CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_link_executable_arm64(void)
+{
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    link_executable("arm64-apple-darwin");
+}
+
+static void test_link_executable_x86_64(void)
+{
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    link_executable("x86_64-apple-darwin");
+}
+
+/*
+ * The same property, but reached through `masa exec make`: make calls the
+ * shimmed cc to link an executable that calls a stubbed libSystem symbol.
+ */
+static void test_exec_make_links_executable(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    char dir[] = "/tmp/masa_makelink_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char mk[4096];
+    char exe[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[8];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("make")) {
+        printf("  SKIP make is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/hello.c", dir);
+    snprintf(mk, sizeof(mk), "%s/Makefile", dir);
+    snprintf(exe, sizeof(exe), "%s/hello", dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    if (write_file(src,
+                   "extern void exit(int);\n"
+                   "int main(void) { exit(0); return 0; }\n") != 0 ||
+        write_file(mk,
+                   "all: hello\n"
+                   "\n"
+                   "hello: hello.c\n"
+                   "\t$(CC) hello.c -o hello\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write test inputs\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "make";
+    argv[3] = "-C";
+    argv[4] = dir;
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  make stdout: %s\n  make stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+
+    if (read_macho_header(exe, magic, filetype) != 0) {
+        fprintf(stderr, "  FAIL no executable produced at %s\n", exe);
+        g_failed++;
+    } else {
+        CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+        CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+    }
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
@@ -1292,6 +1745,17 @@ int main(void)
 
     RUN(test_cc_avoids_recursion);
     RUN(test_cc_honours_real_cc_over_shims);
+
+    RUN(test_sdk_init_stub);
+    RUN(test_sdk_info);
+    RUN(test_sdk_bad_subcommand);
+
+    RUN(test_argv0_dispatch_tools);
+    RUN(test_cc_link_platform_version);
+
+    RUN(test_link_executable_arm64);
+    RUN(test_link_executable_x86_64);
+    RUN(test_exec_make_links_executable);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

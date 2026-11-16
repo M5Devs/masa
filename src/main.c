@@ -26,6 +26,8 @@ static void print_usage(FILE *out, const char *prog)
             "  %s sys <command> [args...]  Run a shimmed Darwin command\n"
             "  %s exec <command> [args...] Run a command inside a shimmed environment\n"
             "  %s init-shims <dir>         Create the argv[0] shim symlinks in <dir>\n"
+            "  %s sdk info                 Report whether the SDK is usable\n"
+            "  %s sdk init-stub <dir>      Write a clean-room stub SDK to <dir>\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -38,8 +40,9 @@ static void print_usage(FILE *out, const char *prog)
             "\n"
             "When invoked as one of the shim names below, Masa acts as that\n"
             "command directly (create the links with `masa init-shims <dir>`):\n"
-            "  cc, clang, gcc, uname, sw_vers, xcode-select, xcrun\n",
-            MASA_VERSION, prog, prog, prog, prog, prog, prog,
+            "  cc, clang, gcc, uname, sw_vers, xcode-select, xcrun,\n"
+            "  ld, ar, ranlib, strip, nm, otool\n",
+            MASA_VERSION, prog, prog, prog, prog, prog, prog, prog, prog,
             MASA_DEFAULT_TARGET);
 }
 
@@ -86,6 +89,9 @@ static int dispatch_argv0(const char *name, int argc, char *const argv[])
         strcmp(name, "xcode-select") == 0 ||
         strcmp(name, "xcrun") == 0) {
         return masa_sys_dispatch(argc, argv);
+    }
+    if (masa_tool_is_shim(name)) {
+        return masa_tool_dispatch(name, argc - 1, &argv[1]);
     }
     return -1;
 }
@@ -136,6 +142,13 @@ int masa_main(int argc, char *const argv[])
             return 2;
         }
         return masa_init_shims_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "sdk") == 0) {
+        if (argc < 3 || argv[2] == NULL) {
+            fprintf(stderr, "masa: sdk: missing subcommand (info | init-stub)\n");
+            return 2;
+        }
+        return masa_sdk_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

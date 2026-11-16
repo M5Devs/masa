@@ -22,10 +22,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* -target T -fuse-ld=lld [-isysroot S] */
-#define MASA_CC_INJECTED_ARGS 5
+/* -target T -fuse-ld=lld -Qunused-arguments [-isysroot S] */
+#define MASA_CC_INJECTED_ARGS 6
+/* -Wl,-platform_version,macos,X,X when linking */
+#define MASA_CC_LINK_ARGS 1
 /* Injected arguments plus the trailing NULL terminator. */
-#define MASA_CC_REQUIRED_SLOTS (MASA_CC_INJECTED_ARGS + 1)
+#define MASA_CC_REQUIRED_SLOTS (MASA_CC_INJECTED_ARGS + MASA_CC_LINK_ARGS + 1)
 
 #define MASA_CC_MAX_ARGS 4096
 #define MASA_PATH_MAX 4096
@@ -219,6 +221,47 @@ char *masa_resolve_cc(void)
     return NULL;
 }
 
+/*
+ * 1 when the invocation only produces object files.  Anything that might
+ * link (no -c, and no -E/-S/-M-only output) needs a platform version.
+ */
+static int is_compile_only(int argc, char *const argv[])
+{
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+
+        if (strcmp(a, "-c") == 0 || strcmp(a, "-S") == 0 ||
+            strcmp(a, "-E") == 0 || strcmp(a, "-M") == 0 ||
+            strcmp(a, "-MM") == 0 || strcmp(a, "-fsyntax-only") == 0) {
+            return 1;
+        }
+        if (strcmp(a, "-o") == 0) {
+            i++; /* skip the output file name */
+        }
+    }
+    return 0;
+}
+
+/*
+ * ld64.lld requires a platform version when linking.  clang only passes
+ * one when it can infer it, so supply it explicitly through the linker
+ * escape hatch when the caller has not.
+ */
+static int has_platform_version(int argc, char *const argv[])
+{
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "-Wl,-platform_version", 21) == 0 ||
+            strcmp(argv[i], "-platform_version") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int masa_build_cc_args(const char *target, const char *sdk_path,
                        const char *args[], int *count, int max_args)
 {
@@ -238,6 +281,9 @@ int masa_build_cc_args(const char *target, const char *sdk_path,
     args[n++] = "-target";
     args[n++] = target;
     args[n++] = "-fuse-ld=lld";
+    /* Linker-only flags are injected into every invocation, so tell
+     * clang not to warn when a compile step cannot use them. */
+    args[n++] = "-Qunused-arguments";
 
     if (sdk_path != NULL && sdk_path[0] != '\0') {
         args[n++] = "-isysroot";
@@ -255,6 +301,7 @@ int masa_cc_main(int argc, char *const argv[])
     const char *target;
     const char *sdk_path;
     char *compiler;
+    char platform_arg[128];
     int count = 0;
     int i;
     int status;
@@ -284,6 +331,16 @@ int masa_cc_main(int argc, char *const argv[])
         fprintf(stderr, "masa: cannot build the cc command line\n");
         free(compiler);
         return 1;
+    }
+
+    if (!is_compile_only(argc, argv) && !has_platform_version(argc, argv)) {
+        snprintf(platform_arg, sizeof(platform_arg),
+                 "-Wl,-platform_version,%s,%s,%s",
+                 MASA_MACOS_PLATFORM, MASA_MACOS_VERSION, MASA_MACOS_VERSION);
+        if (count < MASA_CC_MAX_ARGS - 1) {
+            args[count++] = platform_arg;
+            args[count] = NULL;
+        }
     }
 
     if (env_flag_enabled(MASA_DRY_RUN_ENV)) {

@@ -32,6 +32,12 @@ const char *const masa_shim_tools[] = {
     "sw_vers",
     "xcode-select",
     "xcrun",
+    "ld",
+    "ar",
+    "ranlib",
+    "strip",
+    "nm",
+    "otool",
     NULL
 };
 

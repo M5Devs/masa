@@ -28,13 +28,17 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.2.0"
+#define MASA_VERSION "0.3.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
 
 /* SDK root reported by the shims when MASA_SDK_PATH is not set. */
 #define MASA_DEFAULT_SDK_PATH "/opt/masa/sdk"
+
+/* Platform and version ld64.lld is told about when linking. */
+#define MASA_MACOS_PLATFORM "macos"
+#define MASA_MACOS_VERSION "15.0"
 
 /* ProductName/ProductVersion/BuildVersion reported by the sw_vers shim. */
 #define MASA_SW_PRODUCT_NAME "macOS"
@@ -71,6 +75,13 @@ extern "C" {
  */
 int masa_spawn_wait(const char *const argv[]);
 
+/*
+ * Spawn argv[0], wait for it and copy up to outcap - 1 bytes of its
+ * standard output into out (NUL-terminated).  Returns the child's exit
+ * status, or -1 when Masa itself failed.
+ */
+int masa_capture(const char *const argv[], char *out, size_t outcap);
+
 /* ------------------------------------------------------------------ */
 /* cc wrapper (src/cc_wrapper.c)                                      */
 /* ------------------------------------------------------------------ */
@@ -78,7 +89,7 @@ int masa_spawn_wait(const char *const argv[]);
 /*
  * Append the macOS cross-compilation arguments to argv: the target
  * triple, the linker selection and, when an SDK is configured, the
- * sysroot.  argv must have room for at least 5 more entries.
+ * sysroot.  argv must have room for at least 6 more entries.
  *
  * Returns 0 on success and -1 when an argument is missing or the array
  * would overflow.
@@ -117,6 +128,48 @@ int masa_cc_main(int argc, char *const argv[]);
  * Returns the exit status to report to the shell.
  */
 int masa_sys_dispatch(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Toolchain shims (src/tool_shims.c)                                 */
+/* ------------------------------------------------------------------ */
+
+/* Names handled by the toolchain shims, terminated by NULL. */
+extern const char *const masa_tool_names[];
+
+/*
+ * 1 when name (a bare basename) is one of the toolchain shims.
+ */
+int masa_tool_is_shim(const char *name);
+
+/*
+ * Locate a host tool.  prog_name is queried with
+ * `<cc> -print-prog-name=<prog_name>`; fallbacks are extra bare names
+ * looked up on PATH and next to the compiler.  Returns a malloc'd path
+ * the caller frees, or NULL when nothing was found.
+ */
+char *masa_locate_tool(const char *prog_name, const char *const fallbacks[]);
+
+/*
+ * Run a toolchain shim such as `ld`, `ar`, `ranlib`, `strip`, `nm` or
+ * `otool`.  The name is dispatched to the matching LLVM tool and, for
+ * the linker, a platform version is supplied so ld64.lld can link
+ * Mach-O images.  Returns the process exit status, or -1 when name is
+ * not a toolchain shim.
+ */
+int masa_tool_dispatch(const char *name, int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* SDK helper (src/sdk.c)                                             */
+/* ------------------------------------------------------------------ */
+
+/* Relative path of the stub linker script inside an SDK root. */
+#define MASA_SDK_LIBSYSTEM_RELPATH "usr/lib/libSystem.tbd"
+
+/*
+ * `masa sdk info` and `masa sdk init-stub <dir>`.  Returns the process
+ * exit status.
+ */
+int masa_sdk_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* Environment runner (src/exec.c)                                    */
