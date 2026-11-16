@@ -1,0 +1,9 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Test scratch
+tests/tmp/
