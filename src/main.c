@@ -40,6 +40,7 @@ static void print_usage(FILE *out, const char *prog)
             "                              Build a Homebrew formula into a Cellar\n"
             "  %s swift build [dir]        Build a Swift package (or swiftc wrapper)\n"
             "  %s swift info [dir]         Report a Package.swift's name and layout\n"
+            "  %s doctor                   Check local macOS cross-build readiness\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -59,7 +60,7 @@ static void print_usage(FILE *out, const char *prog)
             "  ld, ar, ranlib, strip, nm, otool, codesign\n",
             MASA_VERSION,
             prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog, prog, prog, prog, prog, prog,
+            prog, prog, prog, prog, prog, prog, prog, prog,
             MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
@@ -192,6 +193,9 @@ int masa_main(int argc, char *const argv[])
     }
     if (strcmp(command, "swift") == 0) {
         return masa_swift_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "doctor") == 0) {
+        return masa_doctor_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

@@ -3749,6 +3749,173 @@ static void test_android_ndk_compile(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 9: masa doctor                                           */
+/* ------------------------------------------------------------------ */
+
+/* A fully set-up environment: clang + lld + a stub SDK present. */
+static void test_doctor_healthy(void)
+{
+    char dir[] = "/tmp/masa_doctor_XXXXXX";
+    char sdk[512];
+    char out[8192];
+    char err[1024];
+    char *argv[] = {"masa", "doctor", NULL};
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL cannot prepare the stub SDK\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  doctor stdout:\n%s\n  doctor stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "[OK]");
+    CHECK_CONTAINS(out, "C compiler");
+    CHECK_CONTAINS(out, "linker");
+    CHECK_CONTAINS(out, "ld64.lld");
+    CHECK_CONTAINS(out, "SDK");
+    CHECK_CONTAINS(out, "arm64-apple-darwin");
+    CHECK_CONTAINS(out, "core C cross-build ready");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* An SDK path that does not exist is a warning, not a hard failure. */
+static void test_doctor_warns_on_missing_sdk(void)
+{
+    char dir[] = "/tmp/masa_doctor2_XXXXXX";
+    char sdk[512];
+    char out[8192];
+    char err[1024];
+    char *argv[] = {"masa", "doctor", NULL};
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    /* Point MASA_SDK_PATH at a directory that has no stub in it. */
+    snprintf(sdk, sizeof(sdk), "%s/missing-sdk", dir);
+
+    reset_masa_env();
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    /* clang and lld are still present, so doctor still exits 0 ... */
+    CHECK(rc == 0);
+    /* ... but the SDK line is a warning that names the hint. */
+    CHECK_CONTAINS(out, "[WARN]");
+    CHECK_CONTAINS(out, "SDK");
+    CHECK_CONTAINS(out, "init-stub");
+    CHECK_CONTAINS(out, sdk);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* With no compiler on PATH the core requirement fails and doctor exits 1. */
+static void test_doctor_reports_missing_compiler(void)
+{
+    char dir[] = "/tmp/masa_doctor3_XXXXXX";
+    char empty[512];
+    char out[8192];
+    char err[1024];
+    char *argv[] = {"masa", "doctor", NULL};
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(empty, sizeof(empty), "%s/empty", dir);
+    if (masa_mkdir_p(empty) != 0) {
+        fprintf(stderr, "  FAIL cannot create %s\n", empty);
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+    /* An empty PATH hides every compiler and tool. */
+    set_env("PATH", empty);
+    set_env(MASA_REAL_CC_ENV, NULL);
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(out, "[MISSING]");
+    CHECK_CONTAINS(out, "C compiler");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 9: the Windows ConPTY backend cross-compiles cleanly      */
+/* ------------------------------------------------------------------ */
+
+static void test_pty_win_cross_compiles(void)
+{
+    char cmd[4096];
+    int rc;
+
+    if (!tool_available("x86_64-w64-mingw32-gcc")) {
+        printf("  SKIP x86_64-w64-mingw32-gcc is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    /*
+     * src/pty_win.c and its shared helper must build on their own with
+     * only MinGW-w64's Win32 headers - no SDL, no libvterm - which is what
+     * lets the GUI cross-compile without an SDL2 install on the host.
+     */
+    snprintf(cmd, sizeof(cmd),
+             "x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror "
+             "-Iinclude -c src/pty_win.c -o /tmp/masa_pty_win.o && "
+             "x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror "
+             "-Iinclude -c src/pty_common.c -o /tmp/masa_pty_common.o");
+    rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "  pty_win cross-compile failed (status %d)\n", rc);
+    }
+    CHECK(rc == 0);
+
+    unlink("/tmp/masa_pty_win.o");
+    unlink("/tmp/masa_pty_common.o");
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -3857,6 +4024,11 @@ int main(void)
     RUN(test_pbxproj_parse_swift_sources);
     RUN(test_xcode_build_swift_dry_run);
     RUN(test_android_ndk_compile);
+
+    RUN(test_doctor_healthy);
+    RUN(test_doctor_warns_on_missing_sdk);
+    RUN(test_doctor_reports_missing_compiler);
+    RUN(test_pty_win_cross_compiles);
 
     printf("\n%d tests run, %d failed, %d skipped\n",
            g_run, g_failed, g_skipped);

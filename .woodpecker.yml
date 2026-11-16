@@ -1,0 +1,45 @@
+# Woodpecker CI configuration for Masa.
+#
+# This pipeline exists so the project can be built and tested on
+# self-hosted runners (for example Codeberg's Woodpecker) without relying
+# on Microsoft/GitHub-hosted infrastructure.  It mirrors what the GitHub
+# Actions workflow does: a dependency-free core build and test, plus the
+# optional masa-term GUI build and its headless tests.
+#
+# Copyright (C) 2026 Masa contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+steps:
+  # The core command line tool has no third-party dependencies, so it
+  # builds and tests on a bare image with just a C compiler.
+  core:
+    image: debian:bookworm-slim
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends build-essential clang make
+      - make
+      - make test
+
+  # masa-term needs SDL2, SDL2_ttf and libvterm; the GUI tests run
+  # headless through the SDL dummy video driver.
+  gui:
+    image: debian:bookworm-slim
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends build-essential clang make
+        pkg-config libsdl2-dev libsdl2-ttf-dev libvterm-dev
+      - make gui
+      - SDL_VIDEODRIVER=dummy make test-gui
+
+  # Reproducible local packaging: produce the native archive (and the
+  # Windows one, since the MinGW-w64 compiler is available here).
+  dist:
+    image: debian:bookworm-slim
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends build-essential make
+        mingw-w64 zip
+      - make dist
+
+when:
+  - event: [push, pull_request, tag, manual]

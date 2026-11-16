@@ -18,11 +18,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -232,153 +229,8 @@ int masa_pty_close(struct masa_pty *pty)
 }
 
 /* ------------------------------------------------------------------ */
-/* `masa shell` command construction                                   */
+/* Pump                                                                */
 /* ------------------------------------------------------------------ */
-
-/* Append an element to a NULL-terminated, malloc'd array. */
-static char **argv_push(char **list, size_t count, char *item)
-{
-    char **grown = realloc(list, (count + 2) * sizeof(*grown));
-
-    if (grown == NULL) {
-        return NULL;
-    }
-    grown[count] = item;
-    grown[count + 1] = NULL;
-    return grown;
-}
-
-static char *locate_masa(void)
-{
-    const char *env = getenv("MASA_BIN");
-
-    if (env != NULL && env[0] != '\0') {
-        return strdup(env);
-    }
-
-    {
-        char *self = masa_self_path();
-
-        if (self != NULL) {
-            char *slash = strrchr(self, '/');
-            char *cand = NULL;
-
-            if (slash != NULL) {
-                size_t need;
-                struct stat st;
-
-                *slash = '\0';
-                need = strlen(self) + strlen("/masa") + 1;
-                cand = malloc(need);
-                if (cand != NULL) {
-                    snprintf(cand, need, "%s/masa", self);
-                    if (stat(cand, &st) != 0) {
-                        free(cand);
-                        cand = NULL;
-                    }
-                }
-            }
-            free(self);
-            if (cand != NULL) {
-                return cand;
-            }
-        }
-    }
-
-    return masa_which("masa");
-}
-
-char **masa_gui_shell_argv(void)
-{
-    char *exe = locate_masa();
-    char **list = NULL;
-    char *sub;
-
-    if (exe == NULL) {
-        return NULL;
-    }
-
-    /* Every element must be owned, because masa_gui_free_argv() frees them. */
-    sub = strdup("shell");
-    if (sub == NULL) {
-        free(exe);
-        return NULL;
-    }
-
-    list = argv_push(list, 0, exe);
-    if (list == NULL) {
-        free(exe);
-        free(sub);
-        return NULL;
-    }
-    list = argv_push(list, 1, sub);
-    if (list == NULL) {
-        free(exe);
-        free(sub);
-        return NULL;
-    }
-    return list;
-}
-
-char **masa_gui_shell_env(void)
-{
-    extern char **environ;
-    char **out = NULL;
-    size_t count = 0;
-    char **p;
-    int have_term = 0;
-
-    for (p = environ; p != NULL && *p != NULL; p++) {
-        char *copy;
-
-        if (strncmp(*p, "TERM=", 5) == 0) {
-            copy = strdup("TERM=xterm-256color");
-            have_term = 1;
-        } else {
-            copy = strdup(*p);
-        }
-        if (copy == NULL) {
-            masa_gui_free_argv(out);
-            return NULL;
-        }
-        out = argv_push(out, count, copy);
-        if (out == NULL) {
-            free(copy);
-            return NULL;
-        }
-        count++;
-    }
-
-    if (!have_term) {
-        char *copy = strdup("TERM=xterm-256color");
-
-        if (copy == NULL) {
-            masa_gui_free_argv(out);
-            return NULL;
-        }
-        out = argv_push(out, count, copy);
-        if (out == NULL) {
-            free(copy);
-            masa_gui_free_argv(out);
-            return NULL;
-        }
-    }
-
-    return out;
-}
-
-void masa_gui_free_argv(char **argv)
-{
-    size_t i;
-
-    if (argv == NULL) {
-        return;
-    }
-    for (i = 0; argv[i] != NULL; i++) {
-        free(argv[i]);
-    }
-    free(argv);
-}
 
 /*
  * `masa_gui_pump` drives the terminal without the SDL event loop.  It is

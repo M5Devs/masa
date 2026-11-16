@@ -10,3 +10,6 @@ tests/tmp/
 
 # Agent workspace
 .openhands/
+
+# Distribution archives
+dist/

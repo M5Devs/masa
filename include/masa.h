@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.8.0"
+#define MASA_VERSION "0.9.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -460,6 +460,18 @@ int masa_brew_lint_formula(const struct masa_brew_formula *f,
  * Returns the process exit status.
  */
 int masa_brew_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Doctor (src/doctor.c)                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * `masa doctor` - inspect the local machine and report whether it can
+ * build macOS binaries (a C compiler, LLVM's ld64.lld, the LLVM tools, an
+ * optional swiftc, the SDK and the target).  Returns 0 when the core
+ * requirements are present and non-zero otherwise.
+ */
+int masa_doctor_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* CLI router (src/main.c)                                            */

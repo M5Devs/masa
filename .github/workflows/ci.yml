@@ -116,10 +116,50 @@ jobs:
           mkdir -p build/win
           for f in src/main.c src/cc_wrapper.c src/swift_wrapper.c \
                    src/sys_shims.c src/tool_shims.c src/sdk.c \
-                   src/xcodeproj.c src/brew.c src/exec.c \
+                   src/xcodeproj.c src/brew.c src/exec.c src/doctor.c \
                    src/platform_win.c; do
             x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
               -c "$f" -o "build/win/$(basename "$f" .c).o"
           done
           x86_64-w64-mingw32-gcc -Iinclude build/win/*.o -o build/win/masa.exe
           ls -l build/win/masa.exe
+
+      # The ConPTY PTY backend must build with only MinGW-w64's headers
+      # (no SDL), which is what lets `make gui` cross-compile for Windows
+      # without an SDL2 install on the host.
+      - name: Cross-compile the ConPTY PTY backend
+        run: |
+          set -e
+          for f in src/pty_win.c src/pty_common.c; do
+            x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
+              -c "$f" -o "build/win/$(basename "$f" .c).o"
+          done
+
+  # `make dist` packages the local build without any hosted CI, and
+  # `masa doctor` reports whether the machine can cross-build.  This job
+  # exercises both the way a developer would run them.
+  dist:
+    name: local packaging (make dist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm mingw-w64 zip
+
+      - name: Build the distribution archives
+        run: make dist
+
+      - name: Verify the archives
+        run: |
+          set -e
+          ls -l dist
+          tar -tzf dist/masa-*-linux-*.tar.gz
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - name: masa doctor
+        run: |
+          make
+          ./build/masa doctor

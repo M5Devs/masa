@@ -26,9 +26,9 @@ else
 PLATFORM_SRC := src/platform_posix.c
 endif
 
-HEADERS := include/masa.h include/masa_compat.h
+HEADERS := include/masa.h include/masa_compat.h include/masa_pty.h
 
-SRC     := src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c $(PLATFORM_SRC)
+SRC     := src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/doctor.c $(PLATFORM_SRC)
 OBJ     := $(SRC:src/%.c=$(OBJDIR)/%.o)
 
 TEST_SRC := tests/test_masa.c $(SRC)
@@ -38,15 +38,17 @@ TEST_CFLAGS := -DMASA_NO_MAIN
 # Kept out of SRC/OBJ so the core tool and its tests stay dependency-free
 # and keep building for Android and Windows.  Build with `make gui`.
 GUI_BIN      := build/masa-term
-# The GUI is POSIX-only (src/pty_posix.c); it reuses the POSIX host
-# services for masa_self_path()/masa_which() when locating the masa binary.
-GUI_SRC      := src/gui_term.c src/pty_posix.c
-GUI_DEPS     := $(GUI_SRC) src/platform_posix.c
+# The GUI uses the POSIX pseudo-terminal backend on POSIX hosts and the
+# ConPTY backend on Windows/MinGW.  masa_pty.h (SDL-free) and pty_common.c
+# are shared by both, so the backend cross-compiles without SDL.
+GUI_PTY_SRC  := $(if $(filter src/platform_win.c,$(PLATFORM_SRC)),src/pty_win.c,src/pty_posix.c)
+GUI_SRC      := src/gui_term.c $(GUI_PTY_SRC) src/pty_common.c
+GUI_DEPS     := $(GUI_SRC) $(PLATFORM_SRC)
 GUI_CFLAGS  ?= $(shell pkg-config --cflags sdl2 SDL2_ttf vterm 2>/dev/null)
 GUI_LIBS    ?= $(shell pkg-config --libs sdl2 SDL2_ttf vterm 2>/dev/null) -lutil
 GUI_TESTBIN  := build/test_gui
 
-.PHONY: all test clean run android gui test-gui
+.PHONY: all test clean run android gui test-gui dist
 
 # Android NDK cross-compile: `make android` builds an aarch64-linux-android
 # binary with the NDK toolchain (override with ANDROID_CC).  The NDK does
@@ -97,6 +99,13 @@ test-gui: $(GUI_TESTBIN) $(BIN)
 $(GUI_TESTBIN): tests/test_gui.c $(GUI_SRC) $(SRC) $(HEADERS) include/masa_gui.h | $(OBJDIR)
 	$(CC) $(CFLAGS) -DMASA_NO_MAIN $(GUI_CFLAGS) $(GUI_SRC) $(SRC) \
 	    tests/test_gui.c -o $@ $(LDFLAGS) $(GUI_LIBS)
+
+# Local reproducible packaging: build the native binary and, when the
+# cross toolchains are on PATH, the Windows (x86_64) and Android (aarch64)
+# ones, then package each under dist/ with LICENSE and README.md and write
+# dist/SHA256SUMS.  See scripts/dist.sh.
+dist:
+	sh scripts/dist.sh
 
 clean:
 	rm -rf $(OBJDIR)

@@ -9,20 +9,21 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 8 (v0.8.0): the standalone GUI terminal emulator, `masa-term`.
-An optional SDL2 + SDL2_ttf + libvterm front end runs `masa shell` on a real
-pseudo-terminal and renders it in a dark, macOS-style window with the classic
-red/yellow/green traffic lights, full 256/RGB colour and a blinking cursor
-(`make gui`, `src/gui_term.c`, `src/pty_posix.c`). The core command line tool
-stays free of any third-party dependency, so the Android NDK and Windows
-MinGW builds are unchanged. This sits on the Milestone 7 Swift toolchain
-support and Android cross-compilation, the Milestone 6 interactive `masa
-shell` and portable host-services layer, the Milestone 5 Homebrew formula
-linter and builder (`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder
-and `codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain
-shims and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
-environment runner, which in turn rest on the Milestone 1 `cc` wrapper and
-`sys` shims.
+Milestone 9 (v0.9.0): local independence. `masa doctor` inspects the machine
+and reports whether it can cross-build macOS binaries, `make dist` packages
+the build reproducibly into `dist/` (native Linux always, plus Windows and
+Android when their toolchains are present) with `.tar.gz`/`.zip` archives and
+`dist/SHA256SUMS`, a `.woodpecker.yml` pipeline runs the build and tests on
+self-hosted CI, and `masa-term` gains a Windows ConPTY pseudo-terminal backend
+(`src/pty_win.c`). This sits on the Milestone 8 standalone GUI terminal
+(`masa-term`, an optional SDL2 + SDL2_ttf + libvterm front end over a real
+PTY), the Milestone 7 Swift toolchain support and Android cross-compilation,
+the Milestone 6 interactive `masa shell` and portable host-services layer, the
+Milestone 5 Homebrew formula linter and builder (`masa brew`), the Milestone 4
+Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3 full Mach-O
+executable linking, toolchain shims and `masa sdk`, and the Milestone 2
+`argv[0]` dispatch and `masa exec` environment runner, which in turn rest on
+the Milestone 1 `cc` wrapper and `sys` shims.
 
 ## Requirements
 
@@ -47,6 +48,7 @@ make          # builds build/masa
 make test     # builds and runs the unit test suite
 make gui      # builds build/masa-term (SDL2 + SDL2_ttf + libvterm)
 make test-gui # builds and runs the headless GUI test suite
+make dist     # packages local builds into dist/ (see below)
 make clean
 ```
 
@@ -156,6 +158,61 @@ masa swift info
 # root:          .
 # sources:       yes (Sources/)
 ```
+
+### `masa doctor`
+
+`masa doctor` inspects the local machine and reports whether it can build
+macOS binaries here, without a Mac or hosted CI. Each item is tagged
+`[OK]`, `[WARN]` or `[MISSING]`:
+
+```sh
+masa doctor
+# masa 0.9.0 doctor - local macOS cross-build readiness
+#
+# [OK]      C compiler     /usr/bin/clang
+# [OK]      linker         /usr/lib/llvm-19/bin/ld64.lld
+# [OK]      archiver       /usr/lib/llvm-19/bin/llvm-ar
+# [OK]      ranlib         /usr/lib/llvm-19/bin/llvm-ranlib
+# [OK]      nm             /usr/lib/llvm-19/bin/llvm-nm
+# [OK]      objdump        /usr/lib/llvm-19/bin/llvm-objdump
+# [WARN]    swiftc         not found (optional; only for Swift targets)
+# [WARN]    SDK            /opt/masa/sdk missing usr/lib/libSystem.tbd and usr/lib/crt1.o
+#          hint: run `masa sdk init-stub /opt/masa/sdk`
+# [OK]      target         arm64-apple-darwin
+#
+# result: core C cross-build ready (clang + ld64.lld)
+```
+
+It checks the C compiler (`MASA_REAL_CC` / `MASA_CC` / `clang`), LLVM's
+`ld64.lld`, the LLVM binutils, an optional `swiftc`, the SDK
+(`$MASA_SDK_PATH`, looking for `usr/lib/libSystem.tbd` and `usr/lib/crt1.o`)
+and the target triple. It exits `0` when the core requirements (a C compiler
+and a Mach-O linker) are present and non-zero otherwise, so it can gate a
+build script.
+
+### `make dist` - local reproducible packaging
+
+`make dist` (which runs `scripts/dist.sh`) builds and packages Masa without
+any hosted CI. It always builds the native Linux binary and, when the
+toolchain is on `PATH`, also the Windows `x86_64` (`x86_64-w64-mingw32-gcc`)
+and Android `aarch64` (`ANDROID_CC`) builds. Each target lands in
+`dist/masa-<version>-<os>-<arch>/` with the binary, `LICENSE` and
+`README.md`, is archived as both a `.tar.gz` and a `.zip`, and a
+`dist/SHA256SUMS` file is written at the end:
+
+```sh
+make dist
+# dist: Masa 0.9.0 (x86_64 host)
+# dist: building native masa-0.9.0-linux-x86_64
+# dist: packaged masa-0.9.0-linux-x86_64.tar.gz and masa-0.9.0-linux-x86_64.zip
+# dist: building masa-0.9.0-windows-x86_64
+# dist: packaged masa-0.9.0-windows-x86_64.tar.gz and masa-0.9.0-windows-x86_64.zip
+# dist: skipping Android (set ANDROID_CC to an NDK clang to include it)
+# dist: wrote .../dist/SHA256SUMS
+```
+
+`zip` is used when available; otherwise the archives are written with
+Python's standard `zipfile` module.
 
 ### `masa exec`, `masa shell` and `masa init-shims`
 
@@ -385,9 +442,10 @@ make gui
 ```
 
 The window is resizable; the terminal recomputes its rows and columns and
-tells the child through `TIOCSWINSZ`. The monospace font is discovered from a
-list of common system fonts (DejaVu Sans Mono, Liberation Mono, JetBrains
-Mono, Menlo, ...), or set explicitly:
+tells the child through `TIOCSWINSZ` (POSIX) or `ResizePseudoConsole`
+(Windows). The monospace font is discovered from a list of common system
+fonts (DejaVu Sans Mono, Liberation Mono, JetBrains Mono, Menlo, ...), or set
+explicitly:
 
 ```sh
 MASA_FONT=/path/to/Font.ttf ./build/masa-term
@@ -395,6 +453,17 @@ MASA_FONT=/path/to/Font.ttf ./build/masa-term
 
 Set `MASA_BIN` if the `masa` executable is not next to `masa-term` or on
 `PATH`.
+
+On POSIX the pseudo-terminal backend is `src/pty_posix.c` (`openpty` +
+`fork`/`exec`). On Windows it is `src/pty_win.c`, which uses the Console
+Pseudo Terminal API (`CreatePseudoConsole`, `ResizePseudoConsole`,
+`ClosePseudoConsole`) available in Windows 10 1809 and later to run
+`masa.exe shell` with the `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` thread
+attribute. Both backends implement the same SDL-free interface declared in
+`include/masa_pty.h`, and the shared `masa shell` command/environment
+construction lives in `src/pty_common.c`, so the Windows backend
+cross-compiles with `x86_64-w64-mingw32-gcc` even when SDL2 is not installed
+on the build host.
 
 ## Environment variables
 
@@ -429,11 +498,16 @@ src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
 src/brew.c             Homebrew formula linter and builder
 src/exec.c             init-shims, exec, shell and the shim environment
+src/doctor.c           masa doctor: local cross-build readiness report
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
 src/platform_win.c     host services on Windows (CreateProcess)
+include/masa_pty.h     SDL-free pseudo-terminal interface (GUI backends)
 include/masa_gui.h     interface for masa-term (GUI build only)
-src/pty_posix.c        pseudo-terminal backend for masa-term
+src/pty_posix.c        POSIX pseudo-terminal backend for masa-term
+src/pty_win.c          Windows ConPTY pseudo-terminal backend
+src/pty_common.c       shared `masa shell` argv/env for the PTY backends
 src/gui_term.c         masa-term: SDL2 + libvterm window (make gui)
+scripts/dist.sh        local reproducible packaging (make dist)
 tests/test_masa.c      unit tests
 tests/test_gui.c       masa-term tests (make test-gui)
 ```
@@ -468,9 +542,16 @@ injects `-target`/`-sdk` (and the Swift default triple) in dry-run mode,
 dispatch the `swift`/`swiftc` `argv[0]` shims, read a generated `Package.swift`
 (reporting the name and `Sources/` tree, and rejecting a non-manifest without
 leaks), drive `masa swift build`, and confirm the Xcode builder routes a
-`.swift` target to `swiftc`. A separate test compiles every source for Android
-with the NDK clang (`ANDROID_CC`) when one is available, and skips otherwise.
-Tests that need `clang` or `make` skip themselves when the tool is absent.
+`.swift` target to `swiftc`. The Milestone 9 tests run `masa doctor` against a
+healthy environment (a stub SDK plus clang and lld present, checking the `[OK]`
+lines and a zero exit) and against a missing SDK (checking the `[WARN]` line
+and the `init-stub` hint), and confirm `doctor` reports a `[MISSING]` compiler
+and exits non-zero when no compiler is on `PATH`; a further test cross-compiles
+the ConPTY backend (`src/pty_win.c`) and its shared helper with
+`x86_64-w64-mingw32-gcc`, skipping when MinGW-w64 is absent. A separate test
+compiles every source for Android with the NDK clang (`ANDROID_CC`) when one is
+available, and skips otherwise. Tests that need `clang` or `make` skip
+themselves when the tool is absent.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
@@ -483,5 +564,9 @@ tears down with no ASan/LSan leaks.
 A GitHub Actions workflow (`.github/workflows/ci.yml`) builds and tests with
 both `gcc` and `clang` on Linux, builds `masa-term` and runs its headless
 tests (`libsdl2-dev`, `libsdl2-ttf-dev`, `libvterm-dev`, `fonts-dejavu-core`),
-cross-compiles the Windows backend with MinGW-w64, and cross-compiles for
-Android with the NDK (`-Wall -Wextra -Werror`).
+cross-compiles the Windows backend with MinGW-w64, cross-compiles for
+Android with the NDK (`-Wall -Wextra -Werror`), and runs `make dist` plus
+`masa doctor`. A `.woodpecker.yml` pipeline runs the same core, GUI and
+packaging steps on self-hosted / Codeberg Woodpecker CI, so the project can be
+built and released without depending on Microsoft/GitHub-hosted
+infrastructure.
