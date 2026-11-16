@@ -9,11 +9,12 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 3 (v0.3.0): full Mach-O executable linking, the toolchain shims
-(`ld`, `ar`, `ranlib`, `strip`, `nm`, `otool`) and `masa sdk`, on top of the
-Milestone 2 `argv[0]` dispatch and `masa exec` environment runner, which sit on
-the Milestone 1 `cc` wrapper and `sys` shims. The process-spawning layer is
-isolated so Windows and Android backends can be added later.
+Milestone 4 (v0.4.0): an Xcode `.xcodeproj` builder (`masa xcode build`) and a
+`codesign` shim, on top of the Milestone 3 full Mach-O executable linking, the
+toolchain shims and `masa sdk`. These sit on the Milestone 2 `argv[0]` dispatch
+and `masa exec` environment runner, which in turn rest on the Milestone 1 `cc`
+wrapper and `sys` shims. The process-spawning layer is isolated so Windows and
+Android backends can be added later.
 
 ## Requirements
 
@@ -44,6 +45,8 @@ masa exec <command> [args...] Run a command inside a shimmed environment
 masa init-shims <dir>         Create the argv[0] shim symlinks in <dir>
 masa sdk info                 Report whether the configured SDK is usable
 masa sdk init-stub <dir>      Write a clean-room stub SDK to <dir>
+masa xcode build <App.xcodeproj> [-o <dir>] [--bundle]
+                              Build an Xcode project without Xcode
 masa version                  Print the Masa version
 masa help                     Show the usage message
 ```
@@ -84,7 +87,7 @@ masa exec ./configure
 
 The symlinks point back at the Masa binary, so when `make` invokes `cc` (or
 `uname`, `sw_vers`, `xcode-select`, `xcrun`, `ld`, `ar`, `ranlib`, `strip`,
-`nm`, `otool`) it re-enters Masa through `argv[0]` dispatch and gets the
+`nm`, `otool`, `codesign`) it re-enters Masa through `argv[0]` dispatch and gets the
 shimmed behaviour. `MASA_REAL_CC` is exported
 first, recording the real host compiler, so the `cc` shim never calls itself
 recursively.
@@ -110,6 +113,7 @@ directly, without a `masa` subcommand:
 | `cc`, `clang`, `gcc`           | same as `masa cc <args...>`  |
 | `uname`, `sw_vers`, `xcode-select`, `xcrun` | same as `masa sys <name> <args...>` |
 | `ld`, `ar`, `ranlib`, `strip`, `nm`, `otool` | the matching LLVM tool |
+| `codesign`                     | ad-hoc sign / verify (see below) |
 
 Any other name falls through to the normal `masa <subcommand>` router.
 
@@ -126,10 +130,27 @@ directly, so Masa routes those names to LLVM's equivalents:
 | `strip`  | `llvm-strip`             |
 | `nm`     | `llvm-nm`                |
 | `otool`  | `llvm-objdump --macho`   |
+| `codesign` | handled in-process     |
 
 Each tool is located with `clang -print-prog-name=<tool>`, then next to the
 host compiler, then on `PATH`. `ld` additionally supplies a
 `-platform_version`, because `ld64.lld` refuses to link without one.
+
+### `codesign`
+
+Darwin build scripts commonly sign their output with `codesign -s -` (ad-hoc)
+and then check it with `codesign --verify`. Masa answers both without a real
+signing backend:
+
+- `codesign -s - [--force] <target>` accepts the request and reports
+  `signed (ad-hoc)`. It never fails a build, which is what a script expects.
+- `codesign --verify <target>` succeeds when `<target>` is a valid 64-bit
+  Mach-O image (`CF FA ED FE`), and reports whether it carries an
+  `LC_CODE_SIGNATURE`.
+
+`ld64.lld` already writes an ad-hoc signature for `arm64` output, so a
+Masa-built arm64 executable is genuinely signed. A non-Mach-O target is
+rejected by both modes.
 
 ### `masa sdk`
 
@@ -143,6 +164,44 @@ code, and it is enough for `ld64.lld` to produce real `MH_EXECUTE` images.
 ```sh
 masa sdk init-stub /opt/masa/sdk
 masa sdk info                     # status: ready (with MASA_SDK_PATH set)
+```
+
+### `masa xcode`
+
+`masa xcode build` reads the text-based `project.pbxproj` inside a
+`.xcodeproj` and turns it into a real Mach-O executable, so a checked-in Xcode
+project can be built on a host without Xcode:
+
+```sh
+masa sdk init-stub /opt/masa/sdk
+MASA_SDK_PATH=/opt/masa/sdk masa xcode build DemoApp.xcodeproj
+# masa: xcode: target 'DemoApp' (2 sources)
+# masa: xcode: built ./DemoApp
+```
+
+The parser is a clean-room recursive-descent reader for the old-style ASCII
+plist grammar the format uses. It finds the `PBXNativeTarget`, takes its
+`productName`, and follows `PBXSourcesBuildPhase` → `PBXBuildFile` →
+`PBXFileReference` to collect the `.c` files the target compiles. Paths are
+resolved through the `PBXGroup` tree, so a source in a `src` group is joined
+back to `src/main.c`. The files are then compiled and linked through the Masa
+`cc` wrapper, which supplies the target triple, the SDK sysroot and `ld64.lld`.
+
+Options:
+
+| Option            | Meaning                                                    |
+| ----------------- | ---------------------------------------------------------- |
+| `-o <dir>`        | Output directory (default: the `.xcodeproj` parent)        |
+| `--bundle`        | Lay the result out as `<dir>/<ProductName>.app`            |
+
+With `--bundle`, the executable is written to
+`<dir>/<ProductName>.app/Contents/MacOS/<ProductName>` alongside a minimal
+`Contents/Info.plist`. Missing or malformed inputs are reported clearly:
+
+```
+masa: xcode build: '/tmp/Nope.xcodeproj' does not exist: No such file or directory
+masa: xcode build: missing /tmp/Empty.xcodeproj/project.pbxproj
+masa: xcode build: malformed project: no PBXNativeTarget in project
 ```
 
 ### `masa sys`
@@ -178,8 +237,9 @@ include/masa.h        public interface
 src/main.c            CLI router and argv[0] dispatch
 src/cc_wrapper.c      clang wrapper and argument injection
 src/sys_shims.c       uname / sw_vers / xcode-select / xcrun shims
-src/tool_shims.c      ld / ar / ranlib / strip / nm / otool shims
+src/tool_shims.c      ld / ar / ranlib / strip / nm / otool shims and codesign
 src/sdk.c             sdk info and the clean-room stub SDK writer
+src/xcodeproj.c       pbxproj parser and the Xcode project builder
 src/exec.c            init-shims, exec and the shim environment
 src/platform_linux.c  process spawning (fork + execvp)
 tests/test_masa.c     unit tests
@@ -188,13 +248,17 @@ tests/test_masa.c     unit tests
 ## Testing
 
 `make test` covers the argument builder, every shim, the CLI router,
-`argv[0]` dispatch, `init-shims`, `exec`, `sdk`, the toolchain shims, and
-compiler-recursion safety.
+`argv[0]` dispatch, `init-shims`, `exec`, `sdk`, `xcode`, the toolchain shims,
+`codesign`, and compiler-recursion safety.
 
 End-to-end tests produce real Mach-O files and check the header bytes: the
 magic number (`CF FA ED FE`) and, for linked output, the file type
 (`MH_EXECUTE`). One drives `masa cc` for both the `arm64` and `x86_64`
 targets, another links through the toolchain shims, and a third runs
 `masa exec make` on a generated project whose `$(CC)` resolves through
-the shim. Tests that need `clang` or `make` skip themselves when the tool is
-absent.
+the shim. The Milestone 4 tests parse a realistic `project.pbxproj` (target
+name plus several `.c` sources, and malformed inputs rejected without leaks),
+build a generated `DemoApp.xcodeproj` into a `DemoApp.app` bundle and check
+the bundled executable is `MH_EXECUTE` with an `Info.plist` beside it, then
+sign and verify that binary through `masa exec codesign`. Tests that need
+`clang` or `make` skip themselves when the tool is absent.

@@ -1699,6 +1699,695 @@ static void test_exec_make_links_executable(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 4 helpers                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A realistic project.pbxproj: a PBXNativeTarget whose PBXSourcesBuildPhase
+ * pulls two C files through PBXBuildFile -> PBXFileReference, both living
+ * in a `src` PBXGroup so the group path has to be joined.
+ */
+static const char *demo_pbxproj(void)
+{
+    return
+    "// !$*UTF8*$!\n"
+    "{\n"
+    "\tarchiveVersion = 1;\n"
+    "\tclasses = {\n"
+    "\t};\n"
+    "\tobjectVersion = 56;\n"
+    "\tobjects = {\n"
+    "\n"
+    "/* Begin PBXBuildFile section */\n"
+    "\t\tA1000000000000000000001 /* main.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001 /* main.c */; };\n"
+    "\t\tA1000000000000000000002 /* helper.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002 /* helper.c */; };\n"
+    "/* End PBXBuildFile section */\n"
+    "\n"
+    "/* Begin PBXFileReference section */\n"
+    "\t\tB1000000000000000000001 /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = \"<group>\"; };\n"
+    "\t\tB1000000000000000000002 /* helper.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = helper.c; sourceTree = \"<group>\"; };\n"
+    "\t\tB1000000000000000000003 /* DemoApp */ = {isa = PBXFileReference; explicitFileType = \"compiled.mach-o.executable\"; path = DemoApp; sourceTree = BUILT_PRODUCTS_DIR; };\n"
+    "/* End PBXFileReference section */\n"
+    "\n"
+    "/* Begin PBXGroup section */\n"
+    "\t\tC1000000000000000000001 = {\n"
+    "\t\t\tisa = PBXGroup;\n"
+    "\t\t\tchildren = (\n"
+    "\t\t\t\tC1000000000000000000002 /* src */,\n"
+    "\t\t\t);\n"
+    "\t\t\tsourceTree = \"<group>\";\n"
+    "\t\t};\n"
+    "\t\tC1000000000000000000002 /* src */ = {\n"
+    "\t\t\tisa = PBXGroup;\n"
+    "\t\t\tchildren = (\n"
+    "\t\t\t\tB1000000000000000000001 /* main.c */,\n"
+    "\t\t\t\tB1000000000000000000002 /* helper.c */,\n"
+    "\t\t\t);\n"
+    "\t\t\tpath = src;\n"
+    "\t\t\tsourceTree = \"<group>\";\n"
+    "\t\t};\n"
+    "/* End PBXGroup section */\n"
+    "\n"
+    "/* Begin PBXNativeTarget section */\n"
+    "\t\tD1000000000000000000001 /* DemoApp */ = {\n"
+    "\t\t\tisa = PBXNativeTarget;\n"
+    "\t\t\tbuildConfigurationList = E1000000000000000000001;\n"
+    "\t\t\tbuildPhases = (\n"
+    "\t\t\t\tF1000000000000000000001 /* Sources */,\n"
+    "\t\t\t);\n"
+    "\t\t\tbuildRules = (\n"
+    "\t\t\t);\n"
+    "\t\t\tdependencies = (\n"
+    "\t\t\t);\n"
+    "\t\t\tname = DemoApp;\n"
+    "\t\t\tproductName = DemoApp;\n"
+    "\t\t\tproductReference = B1000000000000000000003 /* DemoApp */;\n"
+    "\t\t\tproductType = \"com.apple.product-type.tool\";\n"
+    "\t\t};\n"
+    "/* End PBXNativeTarget section */\n"
+    "\n"
+    "/* Begin PBXProject section */\n"
+    "\t\tE1000000000000000000002 /* Project object */ = {\n"
+    "\t\t\tisa = PBXProject;\n"
+    "\t\t\tattributes = {\n"
+    "\t\t\t\tBuildIndependentTargetsInParallel = 1;\n"
+    "\t\t\t};\n"
+    "\t\t\tbuildConfigurationList = E1000000000000000000003;\n"
+    "\t\t\tcompatibilityVersion = \"Xcode 14.0\";\n"
+    "\t\t\tdevelopmentRegion = en;\n"
+    "\t\t\tmainGroup = C1000000000000000000001;\n"
+    "\t\t\tproductRefGroup = C1000000000000000000003;\n"
+    "\t\t\tprojectDirPath = \"\";\n"
+    "\t\t\tprojectRoot = \"\";\n"
+    "\t\t\ttargets = (\n"
+    "\t\t\t\tD1000000000000000000001 /* DemoApp */,\n"
+    "\t\t\t);\n"
+    "\t\t};\n"
+    "/* End PBXProject section */\n"
+    "\n"
+    "/* Begin PBXSourcesBuildPhase section */\n"
+    "\t\tF1000000000000000000001 /* Sources */ = {\n"
+    "\t\t\tisa = PBXSourcesBuildPhase;\n"
+    "\t\t\tbuildActionMask = 2147483647;\n"
+    "\t\t\tfiles = (\n"
+    "\t\t\t\tA1000000000000000000001 /* main.c in Sources */,\n"
+    "\t\t\t\tA1000000000000000000002 /* helper.c in Sources */,\n"
+    "\t\t\t);\n"
+    "\t\t\trunOnlyForDeploymentPostprocessing = 0;\n"
+    "\t\t};\n"
+    "/* End PBXSourcesBuildPhase section */\n"
+    "\t};\n"
+    "\trootObject = E1000000000000000000002 /* Project object */;\n"
+    "}\n";
+}
+
+/* Write a DemoApp.xcodeproj + src/{main.c,helper.c} tree under dir. */
+static int make_demo_project(const char *dir)
+{
+    char xcodeproj[512];
+    char pbx[4096];
+    char src[512];
+    char mainc[4096];
+    char helperh[4096];
+    char helperc[4096];
+
+    snprintf(xcodeproj, sizeof(xcodeproj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(pbx, sizeof(pbx), "%s/project.pbxproj", xcodeproj);
+    snprintf(src, sizeof(src), "%s/src", dir);
+    snprintf(mainc, sizeof(mainc), "%s/main.c", src);
+    snprintf(helperh, sizeof(helperh), "%s/helper.h", src);
+    snprintf(helperc, sizeof(helperc), "%s/helper.c", src);
+
+    if (mkdir(xcodeproj, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    if (mkdir(src, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    if (write_file(pbx, demo_pbxproj()) != 0 ||
+        write_file(mainc,
+                   "#include \"helper.h\"\n"
+                   "int main(void) { return helper_value() == 42 ? 0 : 1; }\n") != 0 ||
+        write_file(helperh, "int helper_value(void);\n") != 0 ||
+        write_file(helperc,
+                   "#include \"helper.h\"\n"
+                   "int helper_value(void) { return 42; }\n") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 4: pbxproj parser                                        */
+/* ------------------------------------------------------------------ */
+
+static void test_pbxproj_parse_target_and_sources(void)
+{
+    struct masa_pbxproj proj;
+    char err[256];
+    const char *text = demo_pbxproj();
+    int rc;
+    size_t i;
+    int saw_main = 0;
+    int saw_helper = 0;
+
+    memset(&proj, 0, sizeof(proj));
+    rc = masa_pbxproj_parse(text, strlen(text), &proj, err, sizeof(err));
+    CHECK(rc == 0);
+    if (rc != 0) {
+        fprintf(stderr, "  parse error: %s\n", err);
+        return;
+    }
+
+    CHECK_STREQ(proj.product_name, "DemoApp");
+    CHECK(proj.source_count == 2);
+    for (i = 0; i < proj.source_count; i++) {
+        if (strcmp(proj.sources[i], "src/main.c") == 0) {
+            saw_main = 1;
+        }
+        if (strcmp(proj.sources[i], "src/helper.c") == 0) {
+            saw_helper = 1;
+        }
+    }
+    CHECK(saw_main);
+    CHECK(saw_helper);
+
+    masa_pbxproj_free(&proj);
+}
+
+static void test_pbxproj_parse_flat_sources(void)
+{
+    /* File references at the top level, no group nesting. */
+    static const char *flat =
+        "{\n"
+        "  objects = {\n"
+        "    T1 = {isa = PBXNativeTarget; name = Flat; productName = Flat;"
+        " buildPhases = (P1); };\n"
+        "    P1 = {isa = PBXSourcesBuildPhase; files = (F1, F2); };\n"
+        "    F1 = {isa = PBXBuildFile; fileRef = R1; };\n"
+        "    F2 = {isa = PBXBuildFile; fileRef = R2; };\n"
+        "    R1 = {isa = PBXFileReference; path = alpha.c; };\n"
+        "    R2 = {isa = PBXFileReference; path = beta.c; };\n"
+        "  };\n"
+        "  rootObject = T1;\n"
+        "}\n";
+    struct masa_pbxproj proj;
+    char err[256];
+    int rc;
+    size_t i;
+    int saw_alpha = 0;
+    int saw_beta = 0;
+
+    memset(&proj, 0, sizeof(proj));
+    rc = masa_pbxproj_parse(flat, strlen(flat), &proj, err, sizeof(err));
+    CHECK(rc == 0);
+    if (rc != 0) {
+        fprintf(stderr, "  parse error: %s\n", err);
+        return;
+    }
+    CHECK_STREQ(proj.product_name, "Flat");
+    CHECK(proj.source_count == 2);
+    for (i = 0; i < proj.source_count; i++) {
+        if (strcmp(proj.sources[i], "alpha.c") == 0) {
+            saw_alpha = 1;
+        }
+        if (strcmp(proj.sources[i], "beta.c") == 0) {
+            saw_beta = 1;
+        }
+    }
+    CHECK(saw_alpha);
+    CHECK(saw_beta);
+
+    masa_pbxproj_free(&proj);
+}
+
+static void test_pbxproj_rejects_malformed(void)
+{
+    struct masa_pbxproj proj;
+    char err[256];
+
+    /* NULL / empty input. */
+    memset(&proj, 0, sizeof(proj));
+    CHECK(masa_pbxproj_parse(NULL, 0, &proj, err, sizeof(err)) == -1);
+    CHECK(proj.product_name == NULL);
+    CHECK(proj.sources == NULL);
+    CHECK(proj.source_count == 0);
+
+    memset(&proj, 0, sizeof(proj));
+    CHECK(masa_pbxproj_parse("", 0, &proj, err, sizeof(err)) == -1);
+
+    /* Unbalanced braces: the value parser must fail cleanly. */
+    memset(&proj, 0, sizeof(proj));
+    CHECK(masa_pbxproj_parse("{ objects = { T = {isa = PBXNativeTarget; }",
+                             strlen("{ objects = { T = {isa = PBXNativeTarget; }"),
+                             &proj, err, sizeof(err)) == -1);
+    CHECK(proj.product_name == NULL);
+
+    /* Well-formed but with no target. */
+    memset(&proj, 0, sizeof(proj));
+    CHECK(masa_pbxproj_parse("{ objects = { }; }",
+                             strlen("{ objects = { }; }"),
+                             &proj, err, sizeof(err)) == -1);
+    CHECK(proj.product_name == NULL);
+
+    /* A target with no C sources must be rejected, not silently built. */
+    {
+        static const char *nosrc =
+            "{ objects = { T = {isa = PBXNativeTarget; productName = X; }; }; }";
+        memset(&proj, 0, sizeof(proj));
+        CHECK(masa_pbxproj_parse(nosrc, strlen(nosrc), &proj, err,
+                                 sizeof(err)) == -1);
+        CHECK(proj.product_name == NULL);
+    }
+
+    /* Not a plist at all. */
+    memset(&proj, 0, sizeof(proj));
+    CHECK(masa_pbxproj_parse("this is not a plist", 19, &proj, err,
+                             sizeof(err)) == -1);
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 4: masa xcode build                                      */
+/* ------------------------------------------------------------------ */
+
+static void test_xcode_build_bundle(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    char dir[] = "/tmp/masa_xcode_XXXXXX";
+    char sdk[512];
+    char out_dir[512];
+    char proj[512];
+    char exe[4096];
+    char plist[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[10];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+    snprintf(proj, sizeof(proj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(exe, sizeof(exe),
+             "%s/DemoApp.app/Contents/MacOS/DemoApp", out_dir);
+    snprintf(plist, sizeof(plist),
+             "%s/DemoApp.app/Contents/Info.plist", out_dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    if (make_demo_project(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot write the demo project\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "--bundle";
+    argv[5] = "-o";
+    argv[6] = out_dir;
+    argv[7] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  xcode build stdout: %s\n  stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "DemoApp");
+
+    if (!file_exists(exe)) {
+        fprintf(stderr, "  FAIL no bundled executable at %s\n", exe);
+        g_failed++;
+    } else if (read_macho_header(exe, magic, filetype) != 0) {
+        fprintf(stderr, "  FAIL cannot read the Mach-O header of %s\n", exe);
+        g_failed++;
+    } else {
+        CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+        CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+    }
+
+    CHECK(file_exists(plist));
+    if (file_exists(plist)) {
+        FILE *fp = fopen(plist, "r");
+        if (fp != NULL) {
+            char buf[1024];
+            size_t got = fread(buf, 1, sizeof(buf) - 1, fp);
+            fclose(fp);
+            buf[got] = '\0';
+            CHECK_CONTAINS(buf, "CFBundleExecutable");
+            CHECK_CONTAINS(buf, "DemoApp");
+        }
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* Without --bundle the binary is written straight into the output dir. */
+static void test_xcode_build_plain(void)
+{
+    char dir[] = "/tmp/masa_xcode2_XXXXXX";
+    char sdk[512];
+    char out_dir[512];
+    char proj[512];
+    char exe[4096];
+    char out[4096];
+    char err[8192];
+    char *argv[10];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/bin", dir);
+    snprintf(proj, sizeof(proj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(exe, sizeof(exe), "%s/DemoApp", out_dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        make_demo_project(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the project\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "-o";
+    argv[5] = out_dir;
+    argv[6] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  xcode build stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK(file_exists(exe));
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_xcode_build_missing_project(void)
+{
+    char dir[] = "/tmp/masa_xcode3_XXXXXX";
+    char missing[512];
+    char err[1024];
+    char *argv[6];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(missing, sizeof(missing), "%s/Nope.xcodeproj", dir);
+
+    reset_masa_env();
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = missing;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "does not exist");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* A .xcodeproj without a project.pbxproj must be reported clearly. */
+static void test_xcode_build_missing_pbxproj(void)
+{
+    char dir[] = "/tmp/masa_xcode4_XXXXXX";
+    char proj[512];
+    char err[1024];
+    char *argv[6];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(proj, sizeof(proj), "%s/Empty.xcodeproj", dir);
+    if (mkdir(proj, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "  FAIL cannot create %s\n", proj);
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "missing");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_xcode_unknown_subcommand(void)
+{
+    char *argv[] = {"masa", "xcode", "bogus", NULL};
+    char err[512];
+    int rc;
+
+    reset_masa_env();
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "unknown subcommand");
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 4: codesign shim                                         */
+/* ------------------------------------------------------------------ */
+
+static void test_codesign_argv0_dispatch(void)
+{
+    char *argv_verify[] = {"/some/dir/codesign", "--verify", "/etc/hostname", NULL};
+    char *argv_sign[] = {"/some/dir/codesign", "-s", "-", "/etc/hostname", NULL};
+    char err[1024];
+    int rc;
+
+    reset_masa_env();
+
+    /* A non-Mach-O target fails verification and signing alike. */
+    rc = run_masa(argv_verify, NULL, 0, err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "Mach-O");
+
+    rc = run_masa(argv_sign, NULL, 0, err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "Mach-O");
+
+    /* No target at all. */
+    {
+        char *argv_none[] = {"/some/dir/codesign", "--verify", NULL};
+        rc = run_masa(argv_none, NULL, 0, err, sizeof(err));
+        CHECK(rc != 0);
+        CHECK_CONTAINS(err, "no target");
+    }
+}
+
+/*
+ * The end-to-end flow the task asks for: build a bundle, then sign and
+ * verify its executable through `masa exec codesign`.
+ */
+static void test_xcode_codesign_roundtrip(void)
+{
+    char dir[] = "/tmp/masa_sign_XXXXXX";
+    char sdk[512];
+    char out_dir[512];
+    char proj[512];
+    char exe[4096];
+    char out[4096];
+    char err[8192];
+    char *argv[10];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+    snprintf(proj, sizeof(proj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(exe, sizeof(exe),
+             "%s/DemoApp.app/Contents/MacOS/DemoApp", out_dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        make_demo_project(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the project\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "--bundle";
+    argv[5] = "-o";
+    argv[6] = out_dir;
+    argv[7] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  xcode build stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK(file_exists(exe));
+
+    /* Ad-hoc sign through masa exec; the shim must not fail the build. */
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "codesign";
+    argv[3] = "-s";
+    argv[4] = "-";
+    argv[5] = "--force";
+    argv[6] = exe;
+    argv[7] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  codesign -s - stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "signed");
+
+    /* Verify through masa exec. */
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "codesign";
+    argv[3] = "--verify";
+    argv[4] = exe;
+    argv[5] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  codesign --verify stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "valid on disk");
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/* init-shims must create a codesign symlink too. */
+static void test_init_shims_includes_codesign(void)
+{
+    char dir[] = "/tmp/masa_shim_sign_XXXXXX";
+    char path[4096];
+    char *argv[4];
+    char out[512];
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_SHIM_TARGET_ENV, "/bin/true");
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "init-shims";
+    argv[2] = dir;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+
+    snprintf(path, sizeof(path), "%s/codesign", dir);
+    CHECK(is_symlink_to(path, "/bin/true"));
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -1756,6 +2445,18 @@ int main(void)
     RUN(test_link_executable_arm64);
     RUN(test_link_executable_x86_64);
     RUN(test_exec_make_links_executable);
+
+    RUN(test_pbxproj_parse_target_and_sources);
+    RUN(test_pbxproj_parse_flat_sources);
+    RUN(test_pbxproj_rejects_malformed);
+    RUN(test_xcode_build_bundle);
+    RUN(test_xcode_build_plain);
+    RUN(test_xcode_build_missing_project);
+    RUN(test_xcode_build_missing_pbxproj);
+    RUN(test_xcode_unknown_subcommand);
+    RUN(test_codesign_argv0_dispatch);
+    RUN(test_xcode_codesign_roundtrip);
+    RUN(test_init_shims_includes_codesign);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

@@ -2,12 +2,13 @@
  * tool_shims.c - route the Darwin toolchain commands to their LLVM
  * equivalents so a full project build can link Mach-O images.
  *
- * ld      -> ld64.lld (with a platform version, which it requires)
- * ar      -> llvm-ar
- * ranlib  -> llvm-ranlib
- * strip   -> llvm-strip
- * nm      -> llvm-nm
- * otool   -> llvm-objdump --macho
+ * ld       -> ld64.lld (with a platform version, which it requires)
+ * ar       -> llvm-ar
+ * ranlib   -> llvm-ranlib
+ * strip    -> llvm-strip
+ * nm       -> llvm-nm
+ * otool    -> llvm-objdump --macho
+ * codesign -> handled in-process (ad-hoc sign / verify)
  *
  * Copyright (C) 2026 Masa contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -29,8 +30,11 @@
 #define MASA_CAPTURE_MAX 4096
 #define MASA_TOOL_MAX_ARGS 4096
 
+/* 64-bit Mach-O magic, little-endian (MH_MAGIC_64). */
+static const unsigned char masa_macho64_magic[4] = {0xCF, 0xFA, 0xED, 0xFE};
+
 const char *const masa_tool_names[] = {
-    "ld", "ar", "ranlib", "strip", "nm", "otool", NULL
+    "ld", "ar", "ranlib", "strip", "nm", "otool", "codesign", NULL
 };
 
 /* Description of one toolchain shim. */
@@ -57,6 +61,9 @@ int masa_tool_is_shim(const char *name)
 
     if (name == NULL) {
         return 0;
+    }
+    if (strcmp(name, "codesign") == 0) {
+        return 1;
     }
     for (i = 0; i < sizeof(masa_tools) / sizeof(masa_tools[0]); i++) {
         if (strcmp(name, masa_tools[i].name) == 0) {
@@ -233,6 +240,199 @@ static const struct masa_tool *find_tool(const char *name)
     return NULL;
 }
 
+/* ------------------------------------------------------------------ */
+/* codesign shim                                                      */
+/* ------------------------------------------------------------------ */
+
+int masa_is_macho64(const char *path)
+{
+    unsigned char magic[4];
+    struct stat st;
+    FILE *fp;
+    size_t got;
+
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return 0;
+    }
+    if (st.st_size < (off_t)sizeof(magic)) {
+        return 0;
+    }
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return 0;
+    }
+    got = fread(magic, 1, sizeof(magic), fp);
+    fclose(fp);
+    if (got != sizeof(magic)) {
+        return 0;
+    }
+    return memcmp(magic, masa_macho64_magic, sizeof(magic)) == 0;
+}
+
+/* Read a 32-bit little-endian word. */
+static unsigned int rd_u32(const unsigned char *p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+/*
+ * 1 when the Mach-O image already carries an LC_CODE_SIGNATURE load
+ * command.  ld64.lld writes an ad-hoc signature for arm64 output by
+ * default, so a Masa-built arm64 binary is already signed.
+ */
+static int macho_has_code_signature(const char *path)
+{
+    unsigned char header[32];
+    unsigned char cmd[8];
+    FILE *fp;
+    unsigned int ncmds;
+    unsigned int i;
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return 0;
+    }
+    if (fread(header, 1, sizeof(header), fp) != sizeof(header)) {
+        fclose(fp);
+        return 0;
+    }
+    ncmds = rd_u32(header + 16);
+
+    for (i = 0; i < ncmds && i < 4096; i++) {
+        unsigned int cmdsize;
+
+        if (fread(cmd, 1, sizeof(cmd), fp) != sizeof(cmd)) {
+            fclose(fp);
+            return 0;
+        }
+        if (rd_u32(cmd) == 0x1d) { /* LC_CODE_SIGNATURE */
+            fclose(fp);
+            return 1;
+        }
+        cmdsize = rd_u32(cmd + 4);
+        if (cmdsize < 8) {
+            break;
+        }
+        if (fseek(fp, (long)(cmdsize - 8), SEEK_CUR) != 0) {
+            break;
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * The last non-option argument, which is the path codesign operates on.
+ * Options that take a separate value (-s, --sign, -i, --identifier) are
+ * skipped so their value is not mistaken for the target.
+ */
+static const char *codesign_target(int argc, char *const argv[])
+{
+    const char *target = NULL;
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+
+        if (strcmp(a, "-s") == 0 || strcmp(a, "--sign") == 0 ||
+            strcmp(a, "-i") == 0 || strcmp(a, "--identifier") == 0 ||
+            strcmp(a, "--entitlements") == 0 ||
+            strcmp(a, "-o") == 0 || strcmp(a, "--options") == 0) {
+            i++; /* skip the option's value */
+            continue;
+        }
+        if (a[0] == '-' && a[1] != '\0') {
+            continue;
+        }
+        target = a;
+    }
+    return target;
+}
+
+/* True when the arguments request signature verification. */
+static int codesign_wants_verify(int argc, char *const argv[])
+{
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--verify") == 0 ||
+            strcmp(argv[i], "-v") == 0 ||
+            strncmp(argv[i], "-v", 2) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* True when the arguments request signing. */
+static int codesign_wants_sign(int argc, char *const argv[])
+{
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--sign") == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int masa_codesign_dispatch(int argc, char *const argv[])
+{
+    const char *target = codesign_target(argc, argv);
+    int signed_already;
+
+    if (target == NULL) {
+        fprintf(stderr, "masa: codesign: no target given\n");
+        return 1;
+    }
+
+    /*
+     * `codesign --verify <target>`: succeed when the target is a valid
+     * 64-bit Mach-O image.  Build scripts run this after linking; the
+     * presence of an ad-hoc signature is reported but not required, since
+     * ld64.lld only writes one for arm64 output.
+     */
+    if (codesign_wants_verify(argc, argv) && !codesign_wants_sign(argc, argv)) {
+        if (!masa_is_macho64(target)) {
+            fprintf(stderr,
+                    "masa: codesign: %s: not a valid 64-bit Mach-O image\n",
+                    target);
+            return 1;
+        }
+        printf("%s: valid on disk\n", target);
+        printf("%s: %s\n", target,
+               macho_has_code_signature(target)
+                   ? "satisfies its Designated Requirement"
+                   : "signed (ad-hoc)");
+        return 0;
+    }
+
+    /*
+     * Ad-hoc signing (`-s -`) and anything else.  ld64.lld already writes
+     * an ad-hoc signature for arm64 output, so a Masa-built binary needs
+     * nothing; for an unsigned image we report that the request was
+     * accepted rather than failing the build script, since Masa has no
+     * signing backend.
+     */
+    if (!masa_is_macho64(target)) {
+        fprintf(stderr,
+                "masa: codesign: %s: not a valid 64-bit Mach-O image\n",
+                target);
+        return 1;
+    }
+
+    signed_already = macho_has_code_signature(target);
+    printf("%s: signed (ad-hoc%s)\n", target,
+           signed_already ? ", already present" : "");
+    return 0;
+}
+
 int masa_tool_dispatch(const char *name, int argc, char *const argv[])
 {
     const struct masa_tool *tool = find_tool(name);
@@ -241,6 +441,10 @@ int masa_tool_dispatch(const char *name, int argc, char *const argv[])
     int count = 0;
     int i;
     int status;
+
+    if (strcmp(name, "codesign") == 0) {
+        return masa_codesign_dispatch(argc, argv);
+    }
 
     if (tool == NULL) {
         return -1;

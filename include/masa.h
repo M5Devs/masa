@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.3.0"
+#define MASA_VERSION "0.4.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -203,6 +203,63 @@ int masa_init_shims_main(int argc, char *const argv[]);
  * Returns the process exit status.
  */
 int masa_exec_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Xcode project builder (src/xcodeproj.c)                            */
+/* ------------------------------------------------------------------ */
+
+/* Directory a .xcodeproj is expected to hold its project file in. */
+#define MASA_PBXPROJ_RELPATH "project.pbxproj"
+
+/*
+ * Parsed view of the parts of a project.pbxproj the builder needs: the
+ * native target's product name and the list of source files (relative to
+ * the .xcodeproj parent directory) it compiles.
+ *
+ * Both arrays are owned by the struct and released by
+ * masa_pbxproj_free(); sources are NUL-terminated strings.
+ */
+struct masa_pbxproj {
+    char *product_name;   /* PBXNativeTarget productName, or NULL */
+    char **sources;       /* PBXBuildFile/PBXFileReference .c paths */
+    size_t source_count;
+};
+
+/*
+ * Parse a project.pbxproj held in memory (len bytes, need not be
+ * NUL-terminated).  Returns 0 on success and -1 on a malformed document,
+ * writing a human-readable reason into err (when errcap > 0).  On
+ * failure any partially built state is released, so *out need not be
+ * cleared by the caller.
+ */
+int masa_pbxproj_parse(const char *text, size_t len,
+                       struct masa_pbxproj *out, char *err, size_t errcap);
+
+/* Release the memory owned by a parsed project (safe on a zeroed struct). */
+void masa_pbxproj_free(struct masa_pbxproj *proj);
+
+/*
+ * `masa xcode build <path/to/App.xcodeproj> [-o <out_dir>] [--bundle]`.
+ * Returns the process exit status.
+ */
+int masa_xcode_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* codesign shim (src/tool_shims.c)                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 1 when target exists and starts with the 64-bit Mach-O magic
+ * (CF FA ED FE), i.e. is a plausible thing to sign or verify.
+ */
+int masa_is_macho64(const char *path);
+
+/*
+ * Run the codesign shim.  Ad-hoc signing (`-s -`) is accepted and, for a
+ * build script's benefit, never fails; `--verify` checks that the target
+ * exists and is a 64-bit Mach-O.  Returns the process exit status.
+ */
+int masa_codesign_dispatch(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* CLI router (src/main.c)                                            */

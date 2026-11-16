@@ -38,6 +38,7 @@ const char *const masa_shim_tools[] = {
     "strip",
     "nm",
     "otool",
+    "codesign",
     NULL
 };
 
