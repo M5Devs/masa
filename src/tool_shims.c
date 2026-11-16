@@ -15,18 +15,18 @@
  */
 
 /* realpath() and friends. */
+#ifndef _WIN32
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-#define MASA_PATH_MAX 4096
 #define MASA_CAPTURE_MAX 4096
 #define MASA_TOOL_MAX_ARGS 4096
 
@@ -139,6 +139,7 @@ static char *path_lookup(const char *name)
     char *copy;
     char *dir;
     char candidate[MASA_PATH_MAX];
+    char path_sep[2];
 
     if (path_env == NULL) {
         return NULL;
@@ -148,7 +149,10 @@ static char *path_lookup(const char *name)
         return NULL;
     }
 
-    for (dir = strtok(copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+    path_sep[0] = masa_path_separator();
+    path_sep[1] = '\0';
+    for (dir = strtok(copy, path_sep); dir != NULL;
+         dir = strtok(NULL, path_sep)) {
         const char *d = (dir[0] == '\0') ? "." : dir;
 
         if (snprintf(candidate, sizeof(candidate), "%s/%s", d, name) >=

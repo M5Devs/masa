@@ -9,9 +9,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>

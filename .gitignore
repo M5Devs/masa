@@ -7,3 +7,6 @@ build/
 
 # Test scratch
 tests/tmp/
+
+# Agent workspace
+.openhands/

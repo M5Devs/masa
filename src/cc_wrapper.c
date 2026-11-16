@@ -10,17 +10,18 @@
  */
 
 /* realpath() and friends. */
+#ifndef _WIN32
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 /* -target T -fuse-ld=lld -Qunused-arguments [-isysroot S] */
 #define MASA_CC_INJECTED_ARGS 6
@@ -86,19 +87,32 @@ static int dir_is_masa(const char *dir)
     char self_dir[MASA_PATH_MAX];
     char *self_alloc;
     const char *shim;
-    char shim_real[MASA_PATH_MAX];
 
     if (dir == NULL || dir[0] == '\0') {
         return 0;
     }
-    if (realpath(dir, dir_real) == NULL) {
-        return 0;
+    {
+        char *real = masa_realpath(dir);
+
+        if (real == NULL) {
+            return 0;
+        }
+        snprintf(dir_real, sizeof(dir_real), "%s", real);
+        free(real);
     }
 
     shim = getenv(MASA_SHIM_DIR_ENV);
-    if (shim != NULL && shim[0] != '\0' && realpath(shim, shim_real) != NULL &&
-        strcmp(shim_real, dir_real) == 0) {
-        return 1;
+    if (shim != NULL && shim[0] != '\0') {
+        char *real = masa_realpath(shim);
+
+        if (real != NULL) {
+            int same = (strcmp(real, dir_real) == 0);
+
+            free(real);
+            if (same) {
+                return 1;
+            }
+        }
     }
 
     self_alloc = masa_self_path();
@@ -112,8 +126,15 @@ static int dir_is_masa(const char *dir)
     snprintf(self, sizeof(self), "%s", self_alloc);
     free(self_alloc);
 
-    if (realpath(self, self_real) == NULL) {
-        snprintf(self_real, sizeof(self_real), "%s", self);
+    {
+        char *real = masa_realpath(self);
+
+        if (real != NULL) {
+            snprintf(self_real, sizeof(self_real), "%s", real);
+            free(real);
+        } else {
+            snprintf(self_real, sizeof(self_real), "%s", self);
+        }
     }
     dir_of(self_real, self_dir, sizeof(self_dir));
 
@@ -161,7 +182,11 @@ char *masa_resolve_cc(void)
     char *path_copy;
     char *dir;
     char candidate[MASA_PATH_MAX];
+    char path_sep[2];
     size_t i;
+
+    path_sep[0] = masa_path_separator();
+    path_sep[1] = '\0';
 
     explicit_path = try_explicit(MASA_REAL_CC_ENV);
     if (explicit_path == NULL) {
@@ -181,7 +206,8 @@ char *masa_resolve_cc(void)
         return NULL;
     }
 
-    for (dir = strtok(path_copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+    for (dir = strtok(path_copy, path_sep); dir != NULL;
+         dir = strtok(NULL, path_sep)) {
         const char *d = (dir[0] == '\0') ? "." : dir;
 
         if (dir_is_masa(d)) {
@@ -189,8 +215,6 @@ char *masa_resolve_cc(void)
         }
 
         for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-            char real[MASA_PATH_MAX];
-
             if (snprintf(candidate, sizeof(candidate), "%s/%s", d, names[i]) >=
                 (int)sizeof(candidate)) {
                 continue;
@@ -200,12 +224,18 @@ char *masa_resolve_cc(void)
             }
 
             /* A symlink farm may point straight back at Masa: reject it. */
-            if (realpath(candidate, real) != NULL) {
-                char *self = masa_self_path();
-                int is_self = (self != NULL && strcmp(self, real) == 0);
-                free(self);
-                if (is_self) {
-                    continue;
+            {
+                char *real = masa_realpath(candidate);
+
+                if (real != NULL) {
+                    char *self = masa_self_path();
+                    int is_self = (self != NULL && strcmp(self, real) == 0);
+
+                    free(self);
+                    free(real);
+                    if (is_self) {
+                        continue;
+                    }
                 }
             }
 

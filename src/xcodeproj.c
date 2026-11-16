@@ -17,17 +17,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #define MASA_PATH_MAX 4096
 #define MASA_CC_MAX_ARGS 8192
@@ -1072,32 +1072,6 @@ static int read_whole_file(const char *path, char **out, size_t *out_len,
     return 0;
 }
 
-static int mkdir_p(const char *path)
-{
-    char tmp[MASA_PATH_MAX];
-    char *p;
-    size_t len = strlen(path);
-
-    if (len == 0 || len >= sizeof(tmp)) {
-        return -1;
-    }
-    memcpy(tmp, path, len + 1);
-
-    for (p = tmp + 1; *p != '\0'; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    return 0;
-}
-
 static void dir_of(const char *path, char *out, size_t outcap)
 {
     const char *slash = strrchr(path, '/');
@@ -1342,7 +1316,7 @@ static int xcode_build(int argc, char *const argv[])
     }
 
     dir_of(exe, exe_dir, sizeof(exe_dir));
-    if (mkdir_p(exe_dir) != 0) {
+    if (masa_mkdir_p(exe_dir) != 0) {
         fprintf(stderr, "masa: xcode build: cannot create '%s': %s\n",
                 exe_dir, strerror(errno));
         masa_pbxproj_free(&proj);
@@ -1369,7 +1343,7 @@ static int xcode_build(int argc, char *const argv[])
             return 1;
         }
         dir_of(plist, contents, sizeof(contents));
-        if (mkdir_p(contents) != 0) {
+        if (masa_mkdir_p(contents) != 0) {
             fprintf(stderr, "masa: xcode build: cannot create '%s': %s\n",
                     contents, strerror(errno));
             masa_pbxproj_free(&proj);

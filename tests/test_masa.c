@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -191,6 +192,96 @@ static int run_masa(char *const argv[], char *out, size_t outcap,
     return -1;
 }
 
+/*
+ * Like run_masa(), but the child's stdin is a pipe carrying script.  Used
+ * to drive the interactive `masa shell` (no -c) from the test harness.
+ */
+static int run_masa_with_stdin(char *const argv[], const char *script,
+                               char *out, size_t outcap)
+{
+    int in_pipe[2];
+    int out_pipe[2];
+    int status = -1;
+    pid_t pid;
+    ssize_t n;
+    size_t used;
+    size_t script_len = strlen(script);
+    size_t written = 0;
+
+    if (out != NULL && outcap > 0) {
+        out[0] = '\0';
+    }
+    if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0) {
+        return -1;
+    }
+
+    fflush(stdout);
+    fflush(stderr);
+
+    pid = fork();
+    if (pid < 0) {
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        int argc = 0;
+
+        while (argv[argc] != NULL) {
+            argc++;
+        }
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        dup2(in_pipe[0], STDIN_FILENO);
+        dup2(out_pipe[1], STDOUT_FILENO);
+        close(in_pipe[0]);
+        close(out_pipe[1]);
+        status = masa_main(argc, argv);
+        fflush(NULL);
+        _exit(status);
+    }
+
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+
+    while (written < script_len) {
+        n = write(in_pipe[1], script + written, script_len - written);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        written += (size_t)n;
+    }
+    close(in_pipe[1]);
+
+    if (out != NULL && outcap > 0) {
+        used = 0;
+        while ((n = read(out_pipe[0], out + used, outcap - 1 - used)) > 0) {
+            used += (size_t)n;
+            if (used >= outcap - 1) {
+                break;
+            }
+        }
+        out[used] = '\0';
+    }
+    close(out_pipe[0]);
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
+
 /* Locate an executable on PATH. */
 static int tool_available(const char *name)
 {
@@ -235,6 +326,7 @@ static void reset_masa_env(void)
     set_env(MASA_REAL_CC_ENV, NULL);
     set_env(MASA_SHIM_DIR_ENV, NULL);
     set_env(MASA_SHIM_TARGET_ENV, NULL);
+    set_env(MASA_KEEP_PS1_ENV, NULL);
     set_env("PATH", g_original_path);
 }
 
@@ -2969,6 +3061,175 @@ static void test_brew_build_errors(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 6: `masa shell` and the host-services layer               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * `masa shell -c <cmd>` must run <cmd> inside the shim environment:
+ * the shim directory is first on PATH, MASA_SHIM_DIR/MASA_REAL_CC are
+ * exported and `command -v cc` resolves to a shim.  TERM is set when the
+ * caller has none.  $SHELL is deliberately left alone (see shell_env).
+ */
+static void test_shell_command_environment(void)
+{
+    char *argv[] = {"masa", "shell", "-c",
+                    "echo shim=$MASA_SHIM_DIR; command -v cc; "
+                    "echo real=$MASA_REAL_CC; echo term=$TERM",
+                    NULL};
+    char out[2048];
+    char err[2048];
+    int rc;
+
+    reset_masa_env();
+    unsetenv("TERM");
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "shim=/");
+    CHECK_CONTAINS(out, "masa-shims-");
+    CHECK_CONTAINS(out, "/cc");
+    CHECK_CONTAINS(out, "real=/");
+    CHECK_CONTAINS(out, "term=");
+    /* A non-empty TERM means Masa supplied a default. */
+    CHECK(strstr(out, "term=\n") == NULL);
+
+    reset_masa_env();
+}
+
+/* The shims must be usable, i.e. `uname` inside the shell reports Darwin. */
+static void test_shell_shims_are_active(void)
+{
+    char *argv[] = {"masa", "shell", "-c", "uname -s", NULL};
+    char out[256];
+    char err[512];
+    char *masa_bin;
+    int rc;
+
+    reset_masa_env();
+
+    /* Point the shims at the real binary, not this test harness. */
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP masa is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_STREQ(out, "Darwin\n");
+
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/* The shell exits with the status of the command it ran. */
+static void test_shell_propagates_exit_status(void)
+{
+    char *argv[] = {"masa", "shell", "-c", "exit 7", NULL};
+    char out[256];
+    int rc;
+
+    reset_masa_env();
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 7);
+
+    reset_masa_env();
+}
+
+/* A missing -c argument is a usage error (exit 2), not a crash. */
+static void test_shell_missing_command_argument(void)
+{
+    char *argv[] = {"masa", "shell", "-c", NULL};
+    char err[512];
+    int rc;
+
+    reset_masa_env();
+
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "-c");
+
+    reset_masa_env();
+}
+
+/* `masa shell` without -c launches an interactive shell.  Feed it a
+ * script on stdin (through `sh -c` the shell reads the pipe) and check
+ * the environment it sees. */
+static void test_shell_interactive_reads_stdin(void)
+{
+    char *argv[] = {"masa", "shell", NULL};
+    char out[1024];
+    char *masa_bin;
+    int rc;
+
+    reset_masa_env();
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP masa is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    /*
+     * The interactive shell (no -c) reads its commands from stdin; feed it
+     * a short script through a pipe and check the shimmed environment.
+     */
+    rc = run_masa_with_stdin(argv, "uname -s\nexit\n", out, sizeof(out));
+    if (rc == -1) {
+        printf("  SKIP cannot wire stdin\n");
+        g_skipped++;
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "Darwin");
+
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/* The host-services layer reports the right separators and shell path. */
+static void test_host_services_basics(void)
+{
+    char tmp[4096];
+    char *self;
+    char *which_sh;
+
+    CHECK(masa_path_separator() == ':' || masa_path_separator() == ';');
+
+    self = masa_self_path();
+    if (self != NULL) {
+        CHECK(self[0] != '\0');
+        free(self);
+    }
+
+    CHECK(masa_shell_path() != NULL);
+    CHECK(masa_shell_path()[0] != '\0');
+
+    CHECK(masa_make_temp_dir("masa-test-", tmp, sizeof(tmp)) == 0);
+    CHECK_CONTAINS(tmp, "masa-test-");
+    CHECK(masa_mkdir_p(tmp) == 0);
+    masa_rmdir(tmp);
+
+    which_sh = masa_which("sh");
+    if (which_sh != NULL) {
+        CHECK(file_exists(which_sh));
+        free(which_sh);
+    }
+    CHECK(masa_which("definitely-not-a-real-tool-xyz") == NULL);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -3054,6 +3315,13 @@ int main(void)
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);
     RUN(test_cc_missing_compiler);
+
+    RUN(test_host_services_basics);
+    RUN(test_shell_command_environment);
+    RUN(test_shell_shims_are_active);
+    RUN(test_shell_propagates_exit_status);
+    RUN(test_shell_missing_command_argument);
+    RUN(test_shell_interactive_reads_stdin);
 
     printf("\n%d tests run, %d failed, %d skipped\n",
            g_run, g_failed, g_skipped);

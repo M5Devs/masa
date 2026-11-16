@@ -9,9 +9,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +28,7 @@ static void print_usage(FILE *out, const char *prog)
             "  %s cc [clang-options...]    Compile or link for macOS with clang\n"
             "  %s sys <command> [args...]  Run a shimmed Darwin command\n"
             "  %s exec <command> [args...] Run a command inside a shimmed environment\n"
+            "  %s shell [-c <command>]     Interactive shell in the shim environment\n"
             "  %s init-shims <dir>         Create the argv[0] shim symlinks in <dir>\n"
             "  %s sdk info                 Report whether the SDK is usable\n"
             "  %s sdk init-stub <dir>      Write a clean-room stub SDK to <dir>\n"
@@ -43,13 +47,14 @@ static void print_usage(FILE *out, const char *prog)
             "  MASA_REAL_CC    host compiler the cc shim must forward to\n"
             "  MASA_SHIM_DIR   directory holding the argv[0] shims\n"
             "  MASA_BREW_PREFIX  prefix for `masa brew build` (default: %s)\n"
+            "  MASA_KEEP_PS1   set to 1 so `masa shell` keeps the caller's prompt\n"
             "\n"
             "When invoked as one of the shim names below, Masa acts as that\n"
             "command directly (create the links with `masa init-shims <dir>`):\n"
             "  cc, clang, gcc, uname, sw_vers, xcode-select, xcrun,\n"
             "  ld, ar, ranlib, strip, nm, otool, codesign\n",
             MASA_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog, MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
+            prog, prog, prog, MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
 static int cmd_version(void)
@@ -141,6 +146,9 @@ int masa_main(int argc, char *const argv[])
             return 2;
         }
         return masa_exec_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "shell") == 0) {
+        return masa_shell_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "init-shims") == 0) {
         if (argc < 3 || argv[2] == NULL) {

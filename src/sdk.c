@@ -10,16 +10,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define MASA_PATH_MAX 4096
 
@@ -34,32 +35,6 @@ static const char *sdk_root(void)
 }
 
 /* Create every directory in path, ignoring those that already exist. */
-static int mkdir_p(const char *path)
-{
-    char tmp[MASA_PATH_MAX];
-    char *p;
-    size_t len = strlen(path);
-
-    if (len == 0 || len >= sizeof(tmp)) {
-        return -1;
-    }
-    memcpy(tmp, path, len + 1);
-
-    for (p = tmp + 1; *p != '\0'; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    return 0;
-}
-
 static int write_text_file(const char *path, const char *text)
 {
     FILE *fp = fopen(path, "w");
@@ -219,7 +194,7 @@ static int sdk_init_stub(const char *dir)
             size_t len = (size_t)(slash - path);
             memcpy(parent, path, len);
             parent[len] = '\0';
-            if (mkdir_p(parent) != 0) {
+            if (masa_mkdir_p(parent) != 0) {
                 fprintf(stderr, "masa: sdk init-stub: cannot create '%s': %s\n",
                         parent, strerror(errno));
                 return 1;

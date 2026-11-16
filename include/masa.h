@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.5.0"
+#define MASA_VERSION "0.6.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -59,12 +59,16 @@ extern "C" {
 /* Overrides the symlink target of `masa init-shims` (defaults to the running
  * Masa executable).  Intended for packaging and tests. */
 #define MASA_SHIM_TARGET_ENV "MASA_SHIM_TARGET"
+/* When set to 1, `masa shell` leaves the caller's PS1 untouched. */
+#define MASA_KEEP_PS1_ENV "MASA_KEEP_PS1"
 
 /* Exit status returned when the wrapper cannot spawn a tool at all. */
 #define MASA_EXIT_SPAWN_ERROR 127
 
 /* ------------------------------------------------------------------ */
-/* Process spawning (src/platform_linux.c)                            */
+/* Process spawning and host services                                 */
+/*   (src/platform_posix.c on Linux/Android, src/platform_win.c on    */
+/*    Windows)                                                        */
 /* ------------------------------------------------------------------ */
 
 /*
@@ -88,6 +92,46 @@ int masa_capture(const char *const argv[], char *out, size_t outcap);
  * `system "make"` runs inside the unpacked source directory.
  */
 int masa_spawn_wait_in(const char *dir, const char *const argv[]);
+
+/*
+ * Create a fresh, empty temporary directory and copy its path into buf
+ * (bufcap bytes).  The directory name is prefix plus a unique suffix.
+ * The path is built under $TMPDIR when that is set, so hosts such as
+ * Android/Termux can redirect it, and otherwise under the platform's
+ * default temporary directory.  Returns 0 on success and -1 on failure.
+ */
+int masa_make_temp_dir(const char *prefix, char *buf, size_t bufcap);
+
+/* The host's PATH list separator: ':' on POSIX, ';' on Windows. */
+char masa_path_separator(void);
+
+/* The path to a POSIX shell, used by `masa shell` as a last resort. */
+const char *masa_shell_path(void);
+
+/* Path of the running Masa executable (resolved through symlinks where
+ * the platform allows it).  Returns a malloc'd string the caller frees,
+ * or NULL on failure. */
+char *masa_self_path(void);
+
+/* Locate name on PATH and return a malloc'd path the caller frees, or
+ * NULL when it is not an executable file. */
+char *masa_which(const char *name);
+
+/* Set or clear an environment variable.  Return 0 on success. */
+int masa_setenv(const char *name, const char *value, int overwrite);
+int masa_unsetenv(const char *name);
+
+/* Create a single directory level (like mkdir(path, 0755)). */
+int masa_mkdir(const char *path);
+
+/* Create one argv[0] shim: a symlink on POSIX, a copy or a .cmd wrapper
+ * on Windows so no administrator privileges are needed.  Returns 0 on
+ * success. */
+int masa_make_shim(const char *dir, const char *name, const char *target);
+
+/* Remove a file or a directory level. */
+int masa_unlink(const char *path);
+int masa_rmdir(const char *path);
 
 /* ------------------------------------------------------------------ */
 /* cc wrapper (src/cc_wrapper.c)                                      */
@@ -219,6 +263,13 @@ int masa_exec_main(int argc, char *const argv[]);
  */
 int masa_exec_run_all(const char *dir, char *const *const *cmds, size_t count);
 
+/*
+ * `masa shell [-c <command>]` - launch an interactive shell (or run a
+ * single command with -c) inside the full shim environment.  Returns the
+ * process exit status.
+ */
+int masa_shell_main(int argc, char *const argv[]);
+
 /* ------------------------------------------------------------------ */
 /* Xcode project builder (src/xcodeproj.c)                            */
 /* ------------------------------------------------------------------ */
@@ -284,6 +335,8 @@ int masa_codesign_dispatch(int argc, char *const argv[]);
 #define MASA_BREW_DEFAULT_PREFIX "/tmp/masa-homebrew"
 /* Environment variable that overrides the default prefix. */
 #define MASA_BREW_PREFIX_ENV "MASA_BREW_PREFIX"
+/* Environment variable consulted first when building the Cellar prefix. */
+#define MASA_TMPDIR_ENV "TMPDIR"
 
 /* One `system "..."` build step found inside `def install`. */
 struct masa_brew_step {

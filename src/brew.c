@@ -17,21 +17,18 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "masa.h"
+#include "masa_compat.h"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#define MASA_PATH_MAX 4096
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                      */
@@ -718,32 +715,6 @@ int masa_brew_lint_formula(const struct masa_brew_formula *f,
 /* Filesystem helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-static int mkdir_p(const char *path)
-{
-    char tmp[MASA_PATH_MAX];
-    char *p;
-    size_t len = strlen(path);
-
-    if (len == 0 || len >= sizeof(tmp)) {
-        return -1;
-    }
-    memcpy(tmp, path, len + 1);
-
-    for (p = tmp + 1; *p != '\0'; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    return 0;
-}
-
 static int read_whole_file(const char *path, char **out, size_t *out_len,
                            char *err, size_t errcap)
 {
@@ -828,15 +799,14 @@ static int link_into_bin(const char *prefix, const char *leaf, const char *targe
 
     if (snprintf(bin_dir, sizeof(bin_dir), "%s/bin", prefix) >=
             (int)sizeof(bin_dir) ||
-        mkdir_p(bin_dir) != 0) {
+        masa_mkdir_p(bin_dir) != 0) {
         return -1;
     }
     if (snprintf(linkpath, sizeof(linkpath), "%s/%s", bin_dir, leaf) >=
         (int)sizeof(linkpath)) {
         return -1;
     }
-    unlink(linkpath);
-    return (symlink(target, linkpath) == 0) ? 0 : -1;
+    return masa_symlink_or_copy(target, linkpath);
 }
 
 /* ------------------------------------------------------------------ */
@@ -929,8 +899,8 @@ static int brew_build(int argc, char *const argv[])
     const char *version;
     char keg[MASA_PATH_MAX];
     char keg_bin[MASA_PATH_MAX];
-    DIR *dir;
-    struct dirent *ent;
+    MASA_DIR *dir;
+    struct masa_dirent *ent;
     int installed = 0;
     int status;
     int i;
@@ -972,9 +942,22 @@ static int brew_build(int argc, char *const argv[])
     if (prefix == NULL) {
         const char *env_prefix = getenv(MASA_BREW_PREFIX_ENV);
 
-        prefix = (env_prefix != NULL && env_prefix[0] != '\0')
-                     ? env_prefix
-                     : MASA_BREW_DEFAULT_PREFIX;
+        if (env_prefix != NULL && env_prefix[0] != '\0') {
+            prefix = env_prefix;
+        } else {
+            /* Fall back under $TMPDIR so Android/Termux and sandboxes can
+             * redirect the Cellar away from an unwritable /tmp. */
+            const char *tmpdir = getenv(MASA_TMPDIR_ENV);
+
+            if (tmpdir != NULL && tmpdir[0] != '\0') {
+                static char defbuf[MASA_PATH_MAX];
+
+                snprintf(defbuf, sizeof(defbuf), "%s/masa-homebrew", tmpdir);
+                prefix = defbuf;
+            } else {
+                prefix = MASA_BREW_DEFAULT_PREFIX;
+            }
+        }
     }
 
     {
@@ -1016,7 +999,7 @@ static int brew_build(int argc, char *const argv[])
         return 1;
     }
 
-    if (mkdir_p(keg_bin) != 0) {
+    if (masa_mkdir_p(keg_bin) != 0) {
         fprintf(stderr, "masa: brew build: cannot create '%s': %s\n", keg_bin,
                 strerror(errno));
         masa_brew_formula_free(&f);
@@ -1038,7 +1021,7 @@ static int brew_build(int argc, char *const argv[])
     }
 
     /* Verify every binary in the keg and link it into <prefix>/bin. */
-    dir = opendir(keg_bin);
+    dir = masa_opendir(keg_bin);
     if (dir == NULL) {
         fprintf(stderr, "masa: brew build: cannot read '%s': %s\n", keg_bin,
                 strerror(errno));
@@ -1046,7 +1029,7 @@ static int brew_build(int argc, char *const argv[])
         return 1;
     }
 
-    while ((ent = readdir(dir)) != NULL) {
+    while ((ent = masa_readdir(dir)) != NULL) {
         char full[MASA_PATH_MAX];
         struct stat st;
         char reason[256];
@@ -1077,7 +1060,7 @@ static int brew_build(int argc, char *const argv[])
                full);
         installed++;
     }
-    closedir(dir);
+    masa_closedir(dir);
 
     if (installed == 0) {
         fprintf(stderr,

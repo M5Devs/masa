@@ -9,14 +9,17 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 5 (v0.5.0): a Homebrew formula linter and builder (`masa brew`) that
-reads a formula without Ruby and installs a real Mach-O binary into a
-Homebrew-style Cellar. It sits on the Milestone 4 Xcode `.xcodeproj` builder and
-`codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain shims
-and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
-environment runner, which in turn rest on the Milestone 1 `cc` wrapper and `sys`
-shims. The process-spawning layer is isolated so Windows and Android backends
-can be added later.
+Milestone 6 (v0.6.0): an interactive `masa shell` that drops you inside the
+full shim environment, and a portable host-services layer. Process spawning,
+temporary directories, `PATH` lookup, environment mutation and shim creation
+now live behind a small platform interface, with a POSIX backend
+(`src/platform_posix.c`, covering Linux and Android/Termux) and a Windows
+backend (`src/platform_win.c`, using `CreateProcess` and MinGW-w64). This sits
+on the Milestone 5 Homebrew formula linter and builder (`masa brew`), the
+Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3
+full Mach-O executable linking, toolchain shims and `masa sdk`, and the
+Milestone 2 `argv[0]` dispatch and `masa exec` environment runner, which in
+turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
 
 ## Requirements
 
@@ -38,12 +41,29 @@ make clean
 Sources are compiled with `-std=c11 -Wall -Wextra -Werror -fsanitize=address`,
 so the build fails on any warning and the tests run under AddressSanitizer.
 
+## Portability
+
+Masa builds on any POSIX host (Linux, and Android/Termux via the `/system/bin`
+shell and `$TMPDIR`), and on Windows through MinGW-w64. The Makefile picks the
+host-services backend automatically: `src/platform_posix.c` everywhere except
+native Windows, where `src/platform_win.c` is used. The Windows binary can be
+cross-compiled from Linux:
+
+```sh
+# build the Windows binary (note: platform_posix.c is left out)
+x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
+  src/main.c src/cc_wrapper.c src/sys_shims.c src/tool_shims.c \
+  src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/platform_win.c \
+  -o masa.exe
+```
+
 ## Usage
 
 ```
 masa cc [clang-options...]    Compile or link for macOS with clang
 masa sys <command> [args...]  Run a shimmed Darwin command
 masa exec <command> [args...] Run a command inside a shimmed environment
+masa shell [-c <command>]     Interactive shell in the shim environment
 masa init-shims <dir>         Create the argv[0] shim symlinks in <dir>
 masa sdk info                 Report whether the configured SDK is usable
 masa sdk init-stub <dir>      Write a clean-room stub SDK to <dir>
@@ -79,7 +99,7 @@ masa sdk init-stub /opt/masa/sdk
 MASA_SDK_PATH=/opt/masa/sdk masa cc hello.c -o hello
 ```
 
-### `masa exec` and `masa init-shims`
+### `masa exec`, `masa shell` and `masa init-shims`
 
 `masa exec` makes a build system believe it is running on macOS. It creates a
 directory of symlinks named after the emulated commands, prepends that
@@ -96,6 +116,19 @@ The symlinks point back at the Masa binary, so when `make` invokes `cc` (or
 shimmed behaviour. `MASA_REAL_CC` is exported
 first, recording the real host compiler, so the `cc` shim never calls itself
 recursively.
+
+`masa shell` drops you into an interactive shell with that same environment
+already installed, so you can explore or drive a build by hand:
+
+```sh
+masa shell                 # zsh, else bash, else sh, inside the shim env
+masa shell -c 'uname -s'   # run one command and exit
+```
+
+The shim directory is first on `PATH`, `MASA_SHIM_DIR` and `MASA_REAL_CC` are
+exported, and `TERM` is defaulted when it is unset. Masa installs a clean
+`masa@Darwin` prompt unless `MASA_KEEP_PS1=1` is set, in which case your own
+prompt is left alone.
 
 `masa init-shims <dir>` performs just the first step, which is useful when you
 want to add the directory to `PATH` yourself:
@@ -287,28 +320,32 @@ Shims the platform queries that build systems use to detect macOS:
 | `MASA_SHIM_DIR` | Directory holding the `argv[0]` shims                  |
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
+| `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
+| `TMPDIR`        | Preferred root for temporary directories and Cellars   |
 
 ## Layout
 
 ```
-include/masa.h        public interface
-src/main.c            CLI router and argv[0] dispatch
-src/cc_wrapper.c      clang wrapper and argument injection
-src/sys_shims.c       uname / sw_vers / xcode-select / xcrun shims
-src/tool_shims.c      ld / ar / ranlib / strip / nm / otool shims and codesign
-src/sdk.c             sdk info and the clean-room stub SDK writer
-src/xcodeproj.c       pbxproj parser and the Xcode project builder
-src/brew.c            Homebrew formula linter and builder
-src/exec.c            init-shims, exec and the shim environment
-src/platform_linux.c  process spawning (fork + execvp)
-tests/test_masa.c     unit tests
+include/masa.h         public interface
+include/masa_compat.h  portability shims (dirent, mkdir -p, ...)
+src/main.c             CLI router and argv[0] dispatch
+src/cc_wrapper.c       clang wrapper and argument injection
+src/sys_shims.c        uname / sw_vers / xcode-select / xcrun shims
+src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims and codesign
+src/sdk.c              sdk info and the clean-room stub SDK writer
+src/xcodeproj.c        pbxproj parser and the Xcode project builder
+src/brew.c             Homebrew formula linter and builder
+src/exec.c             init-shims, exec, shell and the shim environment
+src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
+src/platform_win.c     host services on Windows (CreateProcess)
+tests/test_masa.c      unit tests
 ```
 
 ## Testing
 
 `make test` covers the argument builder, every shim, the CLI router,
-`argv[0]` dispatch, `init-shims`, `exec`, `sdk`, `xcode`, `brew`, the toolchain
-shims, `codesign`, and compiler-recursion safety.
+`argv[0]` dispatch, `init-shims`, `exec`, `shell`, `sdk`, `xcode`, `brew`, the
+toolchain shims, `codesign`, and compiler-recursion safety.
 
 End-to-end tests produce real Mach-O files and check the header bytes: the
 magic number (`CF FA ED FE`) and, for linked output, the file type
@@ -323,5 +360,14 @@ sign and verify that binary through `masa exec codesign`. The Milestone 5 tests
 parse a valid formula and malformed/incomplete ones (rejected without leaks),
 then run `masa brew build` on a generated formula whose install steps compile a
 C source with `$(CC)` and install it, checking the Cellar binary is
-`MH_EXECUTE` and that `<prefix>/bin/<name>` symlinks to it. Tests that need
-`clang` or `make` skip themselves when the tool is absent.
+`MH_EXECUTE` and that `<prefix>/bin/<name>` symlinks to it. The Milestone 6
+tests drive `masa shell` both with `-c` and interactively over a pipe,
+checking the shim environment is installed (shim directory first on `PATH`,
+`MASA_SHIM_DIR`/`MASA_REAL_CC` exported, `TERM` defaulted) and that `uname`
+inside the shell reports `Darwin`, and exercise the host-services layer
+(`masa_path_separator`, `masa_shell_path`, `masa_make_temp_dir`, `masa_which`).
+Tests that need `clang` or `make` skip themselves when the tool is absent.
+
+A GitHub Actions workflow (`.github/workflows/build.yml`) builds and tests with
+both `gcc` and `clang` on Linux, and cross-compiles the Windows backend with
+MinGW-w64 (`-Wall -Wextra -Werror`).
