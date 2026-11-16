@@ -46,7 +46,7 @@ static int wait_for(pid_t pid)
     return decode_status(status);
 }
 
-int masa_spawn_wait(const char *const argv[])
+int masa_spawn_wait_in(const char *dir, const char *const argv[])
 {
     pid_t pid;
 
@@ -66,6 +66,11 @@ int masa_spawn_wait(const char *const argv[])
     }
 
     if (pid == 0) {
+        if (dir != NULL && dir[0] != '\0' && chdir(dir) != 0) {
+            fprintf(stderr, "masa: cannot chdir to '%s': %s\n",
+                    dir, strerror(errno));
+            _exit(MASA_EXIT_SPAWN_ERROR);
+        }
         execvp(argv[0], (char *const *)argv);
         fprintf(stderr, "masa: cannot execute '%s': %s\n",
                 argv[0], strerror(errno));
@@ -73,6 +78,11 @@ int masa_spawn_wait(const char *const argv[])
     }
 
     return wait_for(pid);
+}
+
+int masa_spawn_wait(const char *const argv[])
+{
+    return masa_spawn_wait_in(NULL, argv);
 }
 
 int masa_capture(const char *const argv[], char *out, size_t outcap)

@@ -30,6 +30,9 @@ static void print_usage(FILE *out, const char *prog)
             "  %s sdk init-stub <dir>      Write a clean-room stub SDK to <dir>\n"
             "  %s xcode build <App.xcodeproj> [-o <dir>] [--bundle]\n"
             "                              Build an Xcode project without Xcode\n"
+            "  %s brew lint <formula.rb>   Lint a Homebrew formula\n"
+            "  %s brew build <formula.rb> --source <dir> [--prefix <dir>]\n"
+            "                              Build a Homebrew formula into a Cellar\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -39,13 +42,14 @@ static void print_usage(FILE *out, const char *prog)
             "  MASA_DRY_RUN    set to 1 to print the cc command instead of running it\n"
             "  MASA_REAL_CC    host compiler the cc shim must forward to\n"
             "  MASA_SHIM_DIR   directory holding the argv[0] shims\n"
+            "  MASA_BREW_PREFIX  prefix for `masa brew build` (default: %s)\n"
             "\n"
             "When invoked as one of the shim names below, Masa acts as that\n"
             "command directly (create the links with `masa init-shims <dir>`):\n"
             "  cc, clang, gcc, uname, sw_vers, xcode-select, xcrun,\n"
             "  ld, ar, ranlib, strip, nm, otool, codesign\n",
             MASA_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, prog,
-            MASA_DEFAULT_TARGET);
+            prog, prog, MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
 static int cmd_version(void)
@@ -158,6 +162,13 @@ int masa_main(int argc, char *const argv[])
             return 2;
         }
         return masa_xcode_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "brew") == 0) {
+        if (argc < 3 || argv[2] == NULL) {
+            fprintf(stderr, "masa: brew: missing subcommand (lint | build)\n");
+            return 2;
+        }
+        return masa_brew_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

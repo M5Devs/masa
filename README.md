@@ -9,12 +9,14 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 4 (v0.4.0): an Xcode `.xcodeproj` builder (`masa xcode build`) and a
-`codesign` shim, on top of the Milestone 3 full Mach-O executable linking, the
-toolchain shims and `masa sdk`. These sit on the Milestone 2 `argv[0]` dispatch
-and `masa exec` environment runner, which in turn rest on the Milestone 1 `cc`
-wrapper and `sys` shims. The process-spawning layer is isolated so Windows and
-Android backends can be added later.
+Milestone 5 (v0.5.0): a Homebrew formula linter and builder (`masa brew`) that
+reads a formula without Ruby and installs a real Mach-O binary into a
+Homebrew-style Cellar. It sits on the Milestone 4 Xcode `.xcodeproj` builder and
+`codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain shims
+and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
+environment runner, which in turn rest on the Milestone 1 `cc` wrapper and `sys`
+shims. The process-spawning layer is isolated so Windows and Android backends
+can be added later.
 
 ## Requirements
 
@@ -47,6 +49,9 @@ masa sdk info                 Report whether the configured SDK is usable
 masa sdk init-stub <dir>      Write a clean-room stub SDK to <dir>
 masa xcode build <App.xcodeproj> [-o <dir>] [--bundle]
                               Build an Xcode project without Xcode
+masa brew lint <formula.rb>   Lint a Homebrew formula
+masa brew build <formula.rb> --source <dir> [--prefix <dir>]
+                              Build a Homebrew formula into a Cellar
 masa version                  Print the Masa version
 masa help                     Show the usage message
 ```
@@ -204,6 +209,58 @@ masa: xcode build: missing /tmp/Empty.xcodeproj/project.pbxproj
 masa: xcode build: malformed project: no PBXNativeTarget in project
 ```
 
+### `masa brew`
+
+`masa brew` reads a Homebrew formula (`.rb`) without needing Ruby. The reader
+is a line-oriented scanner, not a Ruby interpreter: it understands the class
+declaration, the scalar `key "value"` metadata fields, and the
+`system "prog", "arg", ...` calls inside `def install`, including the
+`#{prefix}`, `#{bin}`, `#{version}` and `#{name}` interpolations.
+
+`masa brew lint <formula.rb>` checks the fields a working formula needs and
+prints what it found:
+
+```sh
+masa brew lint mytool.rb
+# mytool.rb: ok
+#   name:     mytool
+#   version:  1.2.3
+#   install:  2 steps
+#   test:     present
+```
+
+It fails (non-zero) when a required field is missing — `desc`, `homepage`,
+`url`, `sha256` or `def install` — and warns (without failing) when there is no
+`test do` block:
+
+```
+masa: brew lint: mytool.rb: missing required field 'sha256'
+masa: brew lint: mytool.rb: warning: no 'test do' block
+```
+
+The formula name is derived from the class name (`FooBar` -> `foo-bar`); the
+version comes from an explicit `version "..."` or, failing that, from the URL.
+
+`masa brew build <formula.rb> --source <dir> [--prefix <dir>]` runs the install
+steps and lays out a Homebrew-style Cellar:
+
+```sh
+masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
+# masa: brew: mytool 1.2.3
+# masa: brew: keg    /tmp/homebrew/Cellar/mytool/1.2.3
+# masa: brew: running 2 install steps
+# masa: brew: installed .../Cellar/mytool/1.2.3/bin/mytool (Mach-O MH_EXECUTE)
+# masa: brew: linked    /tmp/homebrew/bin/mytool -> .../bin/mytool
+```
+
+The steps run inside `--source` with the Masa shim environment on `PATH`
+(`cc`, `clang`, `uname`, `sw_vers`, `xcrun`, `codesign`, `ar`, `ld`, ...) and
+`MASA_SDK_PATH`, so a `system "make"` that calls `$(CC)` produces Mach-O. Every
+regular file the steps place in `Cellar/<name>/<version>/bin/` is checked for
+the 64-bit Mach-O magic (`CF FA ED FE`) and the `MH_EXECUTE` file type, then
+linked into `<prefix>/bin/`. The prefix defaults to `$MASA_BREW_PREFIX`, or
+`/tmp/masa-homebrew` when that is unset.
+
 ### `masa sys`
 
 Shims the platform queries that build systems use to detect macOS:
@@ -229,6 +286,7 @@ Shims the platform queries that build systems use to detect macOS:
 | `MASA_REAL_CC`  | Host compiler the `cc` shim must forward to            |
 | `MASA_SHIM_DIR` | Directory holding the `argv[0]` shims                  |
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
+| `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
 
 ## Layout
 
@@ -240,6 +298,7 @@ src/sys_shims.c       uname / sw_vers / xcode-select / xcrun shims
 src/tool_shims.c      ld / ar / ranlib / strip / nm / otool shims and codesign
 src/sdk.c             sdk info and the clean-room stub SDK writer
 src/xcodeproj.c       pbxproj parser and the Xcode project builder
+src/brew.c            Homebrew formula linter and builder
 src/exec.c            init-shims, exec and the shim environment
 src/platform_linux.c  process spawning (fork + execvp)
 tests/test_masa.c     unit tests
@@ -248,8 +307,8 @@ tests/test_masa.c     unit tests
 ## Testing
 
 `make test` covers the argument builder, every shim, the CLI router,
-`argv[0]` dispatch, `init-shims`, `exec`, `sdk`, `xcode`, the toolchain shims,
-`codesign`, and compiler-recursion safety.
+`argv[0]` dispatch, `init-shims`, `exec`, `sdk`, `xcode`, `brew`, the toolchain
+shims, `codesign`, and compiler-recursion safety.
 
 End-to-end tests produce real Mach-O files and check the header bytes: the
 magic number (`CF FA ED FE`) and, for linked output, the file type
@@ -260,5 +319,9 @@ the shim. The Milestone 4 tests parse a realistic `project.pbxproj` (target
 name plus several `.c` sources, and malformed inputs rejected without leaks),
 build a generated `DemoApp.xcodeproj` into a `DemoApp.app` bundle and check
 the bundled executable is `MH_EXECUTE` with an `Info.plist` beside it, then
-sign and verify that binary through `masa exec codesign`. Tests that need
+sign and verify that binary through `masa exec codesign`. The Milestone 5 tests
+parse a valid formula and malformed/incomplete ones (rejected without leaks),
+then run `masa brew build` on a generated formula whose install steps compile a
+C source with `$(CC)` and install it, checking the Cellar binary is
+`MH_EXECUTE` and that `<prefix>/bin/<name>` symlinks to it. Tests that need
 `clang` or `make` skip themselves when the tool is absent.

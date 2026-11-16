@@ -185,19 +185,116 @@ static void env_restore(const char *name, const char *saved)
     }
 }
 
-int masa_exec_main(int argc, char *const argv[])
-{
-    char temp_dir[MASA_PATH_MAX];
-    const char *dir_env;
-    const char *shim_dir;
-    char *target;
-    char *real_cc;
+/*
+ * A shim environment that has been installed onto PATH.  setup() creates
+ * (or reuses) the shim directory and records the values it overrides;
+ * teardown() restores them and removes a directory setup() created.
+ */
+struct shim_env {
+    char dir[MASA_PATH_MAX];
     char *saved_path;
     char *saved_shim_dir;
     char *saved_real_cc;
     char *new_path;
+    int created;
+};
+
+static void shim_env_teardown(struct shim_env *env)
+{
+    env_restore("PATH", env->saved_path);
+    env_restore(MASA_SHIM_DIR_ENV, env->saved_shim_dir);
+    env_restore(MASA_REAL_CC_ENV, env->saved_real_cc);
+
+    free(env->saved_path);
+    free(env->saved_shim_dir);
+    free(env->saved_real_cc);
+    free(env->new_path);
+    env->saved_path = NULL;
+    env->saved_shim_dir = NULL;
+    env->saved_real_cc = NULL;
+    env->new_path = NULL;
+
+    if (env->created) {
+        remove_shims(env->dir);
+        env->created = 0;
+    }
+}
+
+/*
+ * Install the shim environment.  When reuse_dir is non-NULL it is used as
+ * the shim directory (and left in place on teardown); otherwise a fresh
+ * temporary directory is created and later removed.
+ *
+ * Returns 0 on success and -1 on failure, having cleaned up after itself.
+ */
+static int shim_env_setup(struct shim_env *env, const char *reuse_dir)
+{
+    char *real_cc;
+    char *target;
     size_t need;
-    int created = 0;
+
+    memset(env, 0, sizeof(*env));
+
+    /* Resolve the real compiler before PATH starts pointing at our shims. */
+    real_cc = masa_resolve_cc();
+
+    if (reuse_dir != NULL && reuse_dir[0] != '\0') {
+        snprintf(env->dir, sizeof(env->dir), "%s", reuse_dir);
+    } else {
+        snprintf(env->dir, sizeof(env->dir), "/tmp/masa-shims-XXXXXX");
+        if (mkdtemp(env->dir) == NULL) {
+            fprintf(stderr, "masa: exec: cannot create a shim directory: %s\n",
+                    strerror(errno));
+            free(real_cc);
+            return -1;
+        }
+        env->created = 1;
+    }
+
+    target = shim_target();
+    if (target == NULL) {
+        fprintf(stderr, "masa: exec: cannot determine the Masa executable "
+                        "(set %s)\n", MASA_SHIM_TARGET_ENV);
+        goto fail;
+    }
+    if (masa_make_shims(env->dir, target) != 0) {
+        free(target);
+        goto fail;
+    }
+    free(target);
+
+    env->saved_path = env_dup("PATH");
+    env->saved_shim_dir = env_dup(MASA_SHIM_DIR_ENV);
+    env->saved_real_cc = env_dup(MASA_REAL_CC_ENV);
+
+    setenv(MASA_SHIM_DIR_ENV, env->dir, 1);
+    if (real_cc != NULL) {
+        setenv(MASA_REAL_CC_ENV, real_cc, 1);
+    }
+
+    need = strlen(env->dir) + 1 +
+           ((env->saved_path != NULL) ? strlen(env->saved_path) : 0) + 1;
+    env->new_path = malloc(need);
+    if (env->new_path == NULL) {
+        goto fail;
+    }
+    snprintf(env->new_path, need, "%s:%s", env->dir,
+             (env->saved_path != NULL) ? env->saved_path : "");
+    setenv("PATH", env->new_path, 1);
+
+    free(real_cc);
+    return 0;
+
+fail:
+    free(real_cc);
+    shim_env_teardown(env);
+    return -1;
+}
+
+int masa_exec_main(int argc, char *const argv[])
+{
+    struct shim_env env;
+    const char *dir_env;
     int status;
 
     if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
@@ -205,88 +302,38 @@ int masa_exec_main(int argc, char *const argv[])
         return 2;
     }
 
-    /* Resolve the real compiler before PATH starts pointing at our shims. */
-    real_cc = masa_resolve_cc();
-
     dir_env = getenv(MASA_SHIM_DIR_ENV);
-    if (dir_env != NULL && dir_env[0] != '\0') {
-        shim_dir = dir_env;
-    } else {
-        snprintf(temp_dir, sizeof(temp_dir), "/tmp/masa-shims-XXXXXX");
-        if (mkdtemp(temp_dir) == NULL) {
-            fprintf(stderr, "masa: exec: cannot create a shim directory: %s\n",
-                    strerror(errno));
-            free(real_cc);
-            return 1;
-        }
-        shim_dir = temp_dir;
-        created = 1;
-    }
-
-    target = shim_target();
-    if (target == NULL) {
-        fprintf(stderr, "masa: exec: cannot determine the Masa executable "
-                        "(set %s)\n", MASA_SHIM_TARGET_ENV);
-        if (created) {
-            rmdir(shim_dir);
-        }
-        free(real_cc);
+    if (shim_env_setup(&env, dir_env) != 0) {
         return 1;
     }
-
-    if (masa_make_shims(shim_dir, target) != 0) {
-        free(target);
-        if (created) {
-            remove_shims(shim_dir);
-        }
-        free(real_cc);
-        return 1;
-    }
-    free(target);
-
-    saved_path = env_dup("PATH");
-    saved_shim_dir = env_dup(MASA_SHIM_DIR_ENV);
-    saved_real_cc = env_dup(MASA_REAL_CC_ENV);
-
-    setenv(MASA_SHIM_DIR_ENV, shim_dir, 1);
-    if (real_cc != NULL) {
-        setenv(MASA_REAL_CC_ENV, real_cc, 1);
-    }
-
-    need = strlen(shim_dir) + 1 +
-           ((saved_path != NULL) ? strlen(saved_path) : 0) + 1;
-    new_path = malloc(need);
-    if (new_path == NULL) {
-        env_restore("PATH", saved_path);
-        env_restore(MASA_SHIM_DIR_ENV, saved_shim_dir);
-        env_restore(MASA_REAL_CC_ENV, saved_real_cc);
-        free(saved_path);
-        free(saved_shim_dir);
-        free(saved_real_cc);
-        free(real_cc);
-        if (created) {
-            remove_shims(shim_dir);
-        }
-        return 1;
-    }
-    snprintf(new_path, need, "%s:%s", shim_dir,
-             (saved_path != NULL) ? saved_path : "");
-    setenv("PATH", new_path, 1);
 
     status = masa_spawn_wait((const char *const *)argv);
 
-    env_restore("PATH", saved_path);
-    env_restore(MASA_SHIM_DIR_ENV, saved_shim_dir);
-    env_restore(MASA_REAL_CC_ENV, saved_real_cc);
+    shim_env_teardown(&env);
+    return status;
+}
 
-    free(saved_path);
-    free(saved_shim_dir);
-    free(saved_real_cc);
-    free(new_path);
-    free(real_cc);
+int masa_exec_run_all(const char *dir, char *const *const *cmds, size_t count)
+{
+    struct shim_env env;
+    size_t i;
+    int status = 0;
 
-    if (created) {
-        remove_shims(shim_dir);
+    if (cmds == NULL || count == 0) {
+        return 0;
     }
+
+    if (shim_env_setup(&env, NULL) != 0) {
+        return 1;
+    }
+
+    for (i = 0; i < count; i++) {
+        status = masa_spawn_wait_in(dir, (const char *const *)cmds[i]);
+        if (status != 0) {
+            break;
+        }
+    }
+
+    shim_env_teardown(&env);
     return status;
 }

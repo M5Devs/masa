@@ -2388,6 +2388,587 @@ static void test_init_shims_includes_codesign(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Homebrew formula linter and builder                                */
+/* ------------------------------------------------------------------ */
+
+/* A realistic formula used by the lint and build tests. */
+static const char *demo_formula(void)
+{
+    return
+        "class Mytool < Formula\n"
+        "  desc \"A tiny demonstration tool\"\n"
+        "  homepage \"https://example.com/mytool\"\n"
+        "  url \"https://example.com/mytool-1.2.3.tar.gz\"\n"
+        "  sha256 \"0123456789abcdef0123456789abcdef0123456789abcdef"
+        "0123456789abcdef\"\n"
+        "  license \"MIT\"\n"
+        "\n"
+        "  def install\n"
+        "    system \"make\"\n"
+        "    system \"make\", \"install\", \"PREFIX=#{prefix}\"\n"
+        "  end\n"
+        "\n"
+        "  test do\n"
+        "    system \"#{bin}/mytool\"\n"
+        "  end\n"
+        "end\n";
+}
+
+static void test_brew_formula_parse(void)
+{
+    struct masa_brew_formula f;
+    char err[256];
+    int rc = masa_brew_formula_parse(demo_formula(), strlen(demo_formula()),
+                                     &f, err, sizeof(err));
+
+    CHECK(rc == 0);
+    if (rc != 0) {
+        return;
+    }
+    CHECK_STREQ(f.class_name, "Mytool");
+    CHECK_STREQ(f.name, "mytool");
+    CHECK_STREQ(f.desc, "A tiny demonstration tool");
+    CHECK_STREQ(f.homepage, "https://example.com/mytool");
+    CHECK_STREQ(f.url, "https://example.com/mytool-1.2.3.tar.gz");
+    CHECK(f.sha256 != NULL);
+    CHECK_STREQ(f.license, "MIT");
+    CHECK_STREQ(f.version, "1.2.3");
+    CHECK(f.has_install == 1);
+    CHECK(f.has_test == 1);
+    CHECK(f.step_count == 2);
+    if (f.step_count == 2) {
+        CHECK_STREQ(f.steps[0].prog, "make");
+        CHECK(f.steps[0].argc == 1);
+        CHECK_STREQ(f.steps[1].prog, "make");
+        CHECK(f.steps[1].argc == 3);
+        CHECK_STREQ(f.steps[1].argv[1], "install");
+        CHECK_STREQ(f.steps[1].argv[2], "PREFIX=#{prefix}");
+    }
+    masa_brew_formula_free(&f);
+}
+
+/* The class name maps to the formula name; the URL supplies the version. */
+static void test_brew_formula_name_and_version(void)
+{
+    static const char *text =
+        "class FooBarBaz < Formula\n"
+        "  desc \"x\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  url \"https://e.com/foo-bar-baz-4.5.tar.gz\"\n"
+        "  sha256 \"aa\"\n"
+        "  def install\n"
+        "    system \"make\"\n"
+        "  end\n"
+        "end\n";
+    struct masa_brew_formula f;
+    char err[256];
+    int rc = masa_brew_formula_parse(text, strlen(text), &f, err, sizeof(err));
+
+    CHECK(rc == 0);
+    if (rc != 0) {
+        return;
+    }
+    CHECK_STREQ(f.name, "foo-bar-baz");
+    CHECK_STREQ(f.version, "4.5");
+    CHECK(f.has_test == 0);
+    masa_brew_formula_free(&f);
+}
+
+/* An explicit `version "..."` wins over the URL-derived one. */
+static void test_brew_formula_explicit_version(void)
+{
+    static const char *text =
+        "class MyTool < Formula\n"
+        "  desc \"x\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  url \"https://e.com/mytool-9.9.9.tar.gz\"\n"
+        "  sha256 \"aa\"\n"
+        "  version \"1.0.0\"\n"
+        "  def install\n"
+        "    system \"make\"\n"
+        "  end\n"
+        "end\n";
+    struct masa_brew_formula f;
+    char err[256];
+    int rc = masa_brew_formula_parse(text, strlen(text), &f, err, sizeof(err));
+
+    CHECK(rc == 0);
+    if (rc != 0) {
+        return;
+    }
+    CHECK_STREQ(f.name, "my-tool");
+    CHECK_STREQ(f.version, "1.0.0");
+    masa_brew_formula_free(&f);
+}
+
+/* Malformed inputs are rejected cleanly and leave nothing allocated. */
+static void test_brew_formula_rejects_malformed(void)
+{
+    struct masa_brew_formula f;
+    char err[256];
+    static const char *bad[] = {
+        "",                              /* empty */
+        "puts 1\n",                      /* not a formula */
+        "class Broken Formula\n",        /* no < Formula */
+        "def install\n  system \"make\"\nend\n", /* no class */
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        int rc = masa_brew_formula_parse(bad[i], strlen(bad[i]), &f,
+                                         err, sizeof(err));
+        CHECK(rc != 0);
+        CHECK(err[0] != '\0');
+        /* Freeing a failed parse is a no-op but must stay safe. */
+        masa_brew_formula_free(&f);
+    }
+
+    /* A NULL/empty buffer must not crash either. */
+    CHECK(masa_brew_formula_parse(NULL, 0, &f, err, sizeof(err)) != 0);
+}
+
+static void test_brew_lint_valid(void)
+{
+    struct masa_brew_formula f;
+    char err[256];
+    int rc;
+
+    if (masa_brew_formula_parse(demo_formula(), strlen(demo_formula()), &f,
+                                err, sizeof(err)) != 0) {
+        CHECK(0);
+        return;
+    }
+    rc = masa_brew_lint_formula(&f, "demo.rb");
+    CHECK(rc == 0);
+    masa_brew_formula_free(&f);
+}
+
+/* Missing sha256 is a required-field failure. */
+static void test_brew_lint_missing_sha256(void)
+{
+    static const char *text =
+        "class Nohash < Formula\n"
+        "  desc \"x\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  url \"https://e.com/x-1.0.tar.gz\"\n"
+        "  def install\n"
+        "    system \"make\"\n"
+        "  end\n"
+        "end\n";
+    struct masa_brew_formula f;
+    char err[256];
+    int rc;
+
+    CHECK(masa_brew_formula_parse(text, strlen(text), &f, err, sizeof(err)) == 0);
+    rc = masa_brew_lint_formula(&f, "nohash.rb");
+    CHECK(rc != 0);
+    CHECK(f.sha256 == NULL);
+    masa_brew_formula_free(&f);
+}
+
+/* Missing `def install` is a required-field failure. */
+static void test_brew_lint_missing_install(void)
+{
+    static const char *text =
+        "class Noinstall < Formula\n"
+        "  desc \"x\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  url \"https://e.com/x-1.0.tar.gz\"\n"
+        "  sha256 \"abc\"\n"
+        "end\n";
+    struct masa_brew_formula f;
+    char err[256];
+    int rc;
+
+    CHECK(masa_brew_formula_parse(text, strlen(text), &f, err, sizeof(err)) == 0);
+    rc = masa_brew_lint_formula(&f, "noinstall.rb");
+    CHECK(rc != 0);
+    CHECK(f.has_install == 0);
+    masa_brew_formula_free(&f);
+}
+
+/* The lint subcommand reads a file and reports through the router. */
+static void test_brew_lint_subcommand(void)
+{
+    char dir[] = "/tmp/masa_brew_lint_XXXXXX";
+    char formula[512];
+    char missing[512];
+    char out[4096];
+    char err[8192];
+    char *argv[6];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(formula, sizeof(formula), "%s/mytool.rb", dir);
+    snprintf(missing, sizeof(missing), "%s/nope.rb", dir);
+
+    if (write_file(formula, demo_formula()) != 0) {
+        fprintf(stderr, "  FAIL cannot write the formula\n");
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "lint";
+    argv[3] = formula;
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  brew lint stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "mytool");
+
+    /* A missing file is reported, not crashed on. */
+    argv[3] = missing;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "cannot open");
+
+    /* Unknown subcommand. */
+    argv[2] = "frobnicate";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* A C project the demo formula builds: a Makefile and a source file. */
+static int make_brew_source(const char *dir)
+{
+    char src[512];
+    char makefile[1024];
+    char mainc[1024];
+
+    snprintf(src, sizeof(src), "%s/src", dir);
+    snprintf(makefile, sizeof(makefile), "%s/Makefile", src);
+    snprintf(mainc, sizeof(mainc), "%s/mytool.c", src);
+
+    if (mkdir(src, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    if (write_file(mainc,
+                   "#include <stdio.h>\n"
+                   "int main(void) { puts(\"mytool\"); return 0; }\n") != 0 ||
+        write_file(makefile,
+                   "PREFIX ?= /usr/local\n"
+                   "all: mytool\n"
+                   "\n"
+                   "mytool: mytool.c\n"
+                   "\t$(CC) mytool.c -o mytool\n"
+                   "\n"
+                   "install: mytool\n"
+                   "\tmkdir -p $(PREFIX)/bin\n"
+                   "\tcp mytool $(PREFIX)/bin/mytool\n") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void test_brew_build_makefile(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    char dir[] = "/tmp/masa_brew_build_XXXXXX";
+    char sdk[512];
+    char prefix[512];
+    char formula[512];
+    char srcdir[512];
+    char binpath[4096];
+    char linkpath[4096];
+    char out[8192];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[10];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang") || !tool_available("make")) {
+        printf("  SKIP clang or make is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(prefix, sizeof(prefix), "%s/prefix", dir);
+    snprintf(formula, sizeof(formula), "%s/mytool.rb", dir);
+    snprintf(srcdir, sizeof(srcdir), "%s/src", dir);
+    snprintf(binpath, sizeof(binpath),
+             "%s/Cellar/mytool/1.2.3/bin/mytool", prefix);
+    snprintf(linkpath, sizeof(linkpath), "%s/bin/mytool", prefix);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        make_brew_source(dir) != 0 ||
+        write_file(formula, demo_formula()) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the brew project\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "build";
+    argv[3] = formula;
+    argv[4] = "--source";
+    argv[5] = srcdir;
+    argv[6] = "--prefix";
+    argv[7] = prefix;
+    argv[8] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  brew build stdout: %s\n  stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+
+    CHECK(file_exists(binpath));
+    if (file_exists(binpath)) {
+        if (read_macho_header(binpath, magic, filetype) != 0) {
+            fprintf(stderr, "  FAIL cannot read the Mach-O header\n");
+            g_failed++;
+        } else {
+            CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+            CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+        }
+    }
+
+    /* <prefix>/bin/mytool must be a symlink to the keg binary. */
+    CHECK(is_symlink_to(linkpath, binpath));
+
+    /* The installed binary is a valid thing to sign and verify. */
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "codesign";
+    argv[3] = "-s";
+    argv[4] = "-";
+    argv[5] = binpath;
+    argv[6] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "signed");
+
+    argv[0] = "masa";
+    argv[1] = "exec";
+    argv[2] = "codesign";
+    argv[3] = "--verify";
+    argv[4] = binpath;
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "valid on disk");
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/* The `cc` + `mkdir -p #{bin}` + `cp` variant of an install block. */
+static void test_brew_build_cc_steps(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    static const char *formula_text =
+        "class Cctool < Formula\n"
+        "  desc \"Built with cc directly\"\n"
+        "  homepage \"https://example.com/cctool\"\n"
+        "  url \"https://example.com/cctool-2.0.0.tar.gz\"\n"
+        "  sha256 \"deadbeef\"\n"
+        "  def install\n"
+        "    system \"cc\", \"cctool.c\", \"-o\", \"cctool\"\n"
+        "    system \"mkdir\", \"-p\", \"#{bin}\"\n"
+        "    system \"cp\", \"cctool\", \"#{bin}/cctool\"\n"
+        "  end\n"
+        "end\n";
+    char dir[] = "/tmp/masa_brew_cc_XXXXXX";
+    char sdk[512];
+    char prefix[512];
+    char formula[512];
+    char srcdir[512];
+    char binpath[4096];
+    char linkpath[4096];
+    char out[8192];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[10];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(prefix, sizeof(prefix), "%s/prefix", dir);
+    snprintf(formula, sizeof(formula), "%s/cctool.rb", dir);
+    snprintf(srcdir, sizeof(srcdir), "%s/src", dir);
+    snprintf(binpath, sizeof(binpath),
+             "%s/Cellar/cctool/2.0.0/bin/cctool", prefix);
+    snprintf(linkpath, sizeof(linkpath), "%s/bin/cctool", prefix);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        mkdir(srcdir, 0755) != 0 ||
+        write_file(formula, formula_text) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the brew project\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    {
+        char mainc[1024];
+        snprintf(mainc, sizeof(mainc), "%s/cctool.c", srcdir);
+        if (write_file(mainc, "int main(void) { return 0; }\n") != 0) {
+            fprintf(stderr, "  FAIL cannot write the source\n");
+            g_failed++;
+            remove_tree(dir);
+            free(masa_bin);
+            reset_masa_env();
+            return;
+        }
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "build";
+    argv[3] = formula;
+    argv[4] = "--source";
+    argv[5] = srcdir;
+    argv[6] = "--prefix";
+    argv[7] = prefix;
+    argv[8] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  brew build stdout: %s\n  stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+
+    CHECK(file_exists(binpath));
+    if (file_exists(binpath)) {
+        if (read_macho_header(binpath, magic, filetype) != 0) {
+            g_failed++;
+        } else {
+            CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+            CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+        }
+    }
+    CHECK(is_symlink_to(linkpath, binpath));
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/* Missing arguments and a missing install block are reported cleanly. */
+static void test_brew_build_errors(void)
+{
+    char dir[] = "/tmp/masa_brew_err_XXXXXX";
+    char noinstall[512];
+    char out[4096];
+    char err[8192];
+    char *argv[10];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(noinstall, sizeof(noinstall), "%s/noinstall.rb", dir);
+    write_file(noinstall,
+               "class Noinstall < Formula\n"
+               "  desc \"x\"\n"
+               "  homepage \"https://e.com\"\n"
+               "  url \"https://e.com/x-1.0.tar.gz\"\n"
+               "  sha256 \"abc\"\n"
+               "end\n");
+
+    reset_masa_env();
+
+    /* No formula argument. */
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "build";
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing <formula.rb>");
+
+    /* Formula but no --source. */
+    argv[3] = noinstall;
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing --source");
+
+    /* A formula with no `def install` cannot be built. */
+    argv[4] = "--source";
+    argv[5] = dir;
+    argv[6] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "no 'def install'");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -2457,6 +3038,18 @@ int main(void)
     RUN(test_codesign_argv0_dispatch);
     RUN(test_xcode_codesign_roundtrip);
     RUN(test_init_shims_includes_codesign);
+
+    RUN(test_brew_formula_parse);
+    RUN(test_brew_formula_name_and_version);
+    RUN(test_brew_formula_explicit_version);
+    RUN(test_brew_formula_rejects_malformed);
+    RUN(test_brew_lint_valid);
+    RUN(test_brew_lint_missing_sha256);
+    RUN(test_brew_lint_missing_install);
+    RUN(test_brew_lint_subcommand);
+    RUN(test_brew_build_makefile);
+    RUN(test_brew_build_cc_steps);
+    RUN(test_brew_build_errors);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

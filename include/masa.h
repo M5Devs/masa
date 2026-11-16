@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.4.0"
+#define MASA_VERSION "0.5.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -81,6 +81,13 @@ int masa_spawn_wait(const char *const argv[]);
  * status, or -1 when Masa itself failed.
  */
 int masa_capture(const char *const argv[], char *out, size_t outcap);
+
+/*
+ * Like masa_spawn_wait(), but the child first chdir()s into dir (when
+ * non-NULL and non-empty).  Used by the Homebrew builder so a formula's
+ * `system "make"` runs inside the unpacked source directory.
+ */
+int masa_spawn_wait_in(const char *dir, const char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* cc wrapper (src/cc_wrapper.c)                                      */
@@ -204,6 +211,14 @@ int masa_init_shims_main(int argc, char *const argv[]);
  */
 int masa_exec_main(int argc, char *const argv[]);
 
+/*
+ * Run a list of argument vectors, each with the shim environment on PATH
+ * and with the child chdir()ed into dir (when non-NULL).  Stops at the
+ * first non-zero status and returns it; 0 when every command succeeded.
+ * Used by `masa brew build` to run a formula's install steps.
+ */
+int masa_exec_run_all(const char *dir, char *const *const *cmds, size_t count);
+
 /* ------------------------------------------------------------------ */
 /* Xcode project builder (src/xcodeproj.c)                            */
 /* ------------------------------------------------------------------ */
@@ -260,6 +275,72 @@ int masa_is_macho64(const char *path);
  * exists and is a 64-bit Mach-O.  Returns the process exit status.
  */
 int masa_codesign_dispatch(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Homebrew formula linter and builder (src/brew.c)                   */
+/* ------------------------------------------------------------------ */
+
+/* Prefix used by `masa brew build` when none is given or configured. */
+#define MASA_BREW_DEFAULT_PREFIX "/tmp/masa-homebrew"
+/* Environment variable that overrides the default prefix. */
+#define MASA_BREW_PREFIX_ENV "MASA_BREW_PREFIX"
+
+/* One `system "..."` build step found inside `def install`. */
+struct masa_brew_step {
+    char *prog;    /* program to run, e.g. "make" */
+    char **argv;   /* full argument vector, NULL-terminated */
+    size_t argc;
+};
+
+/*
+ * Parsed view of the parts of a Homebrew formula the linter and builder
+ * need.  Every string is owned by the struct and released by
+ * masa_brew_formula_free(); the strings are NULL when the field is
+ * absent.
+ */
+struct masa_brew_formula {
+    char *class_name;   /* `class Foo < Formula` -> "Foo" */
+    char *name;         /* formula name derived from class_name */
+    char *desc;
+    char *homepage;
+    char *url;
+    char *sha256;
+    char *license;
+    char *version;      /* explicit `version "x"`, else NULL */
+    int has_install;    /* `def install` present */
+    int has_test;       /* `test do` present */
+    struct masa_brew_step *steps;
+    size_t step_count;
+};
+
+/*
+ * Parse a formula held in memory (len bytes, need not be NUL-terminated).
+ * Returns 0 on success and -1 on a document that is not a formula,
+ * writing a reason into err (when errcap > 0).  On failure any partially
+ * built state is released.
+ */
+int masa_brew_formula_parse(const char *text, size_t len,
+                            struct masa_brew_formula *out,
+                            char *err, size_t errcap);
+
+/* Release the memory owned by a parsed formula (safe on a zeroed struct). */
+void masa_brew_formula_free(struct masa_brew_formula *f);
+
+/*
+ * Lint a parsed formula: check the required fields (`desc`, `homepage`,
+ * `url`, `sha256`, `def install`) and warn about a missing `test do`.
+ * Returns 0 when the formula is valid and non-zero otherwise.  `label`
+ * names the source in diagnostics (normally the file path).
+ */
+int masa_brew_lint_formula(const struct masa_brew_formula *f,
+                           const char *label);
+
+/*
+ * `masa brew lint <formula.rb>` and
+ * `masa brew build <formula.rb> --source <dir> [--prefix <dir>]`.
+ * Returns the process exit status.
+ */
+int masa_brew_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* CLI router (src/main.c)                                            */
