@@ -24,6 +24,8 @@ const char *const masa_shim_tools[] = {
     "cc",
     "clang",
     "gcc",
+    "swift",
+    "swiftc",
     "uname",
     "sw_vers",
     "xcode-select",

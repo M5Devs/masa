@@ -31,6 +31,17 @@
 
 #define MASA_PATH_MAX 4096
 #define MASA_CC_MAX_ARGS 8192
+#define MASA_XCODE_MAX_ARGS 8192
+
+/* 1 when MASA_DRY_RUN asks the wrappers to print instead of executing. */
+static int dry_run_enabled(void)
+{
+    const char *value = getenv(MASA_DRY_RUN_ENV);
+
+    return value != NULL &&
+           (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
+            strcmp(value, "yes") == 0);
+}
 
 /* ------------------------------------------------------------------ */
 /* Value tree                                                         */
@@ -437,6 +448,24 @@ static int is_c_source(const char *path)
     return len > 2 && strcmp(path + len - 2, ".c") == 0;
 }
 
+/* True when the reference is a Swift translation unit. */
+static int is_swift_source(const char *path)
+{
+    size_t len;
+
+    if (path == NULL) {
+        return 0;
+    }
+    len = strlen(path);
+    return len > 6 && strcmp(path + len - 6, ".swift") == 0;
+}
+
+/* True when the reference is a source file Masa knows how to build. */
+static int is_known_source(const char *path)
+{
+    return is_c_source(path) || is_swift_source(path);
+}
+
 /*
  * The objects dictionary: every pbxproj object is a member keyed by its
  * identifier, so the pair list is the object list.
@@ -733,25 +762,46 @@ static int sources_has(char **result, size_t count, const char *path)
     return 0;
 }
 
+static void free_sources(char **sources);
+
+/* Append a source to the C or Swift list, depending on its extension. */
+static int sources_push_classified(char ***c_result, size_t *c_count,
+                                   size_t *c_cap,
+                                   char ***swift_result, size_t *swift_count,
+                                   size_t *swift_cap, const char *path)
+{
+    if (is_swift_source(path)) {
+        return sources_push(swift_result, swift_count, swift_cap, path);
+    }
+    return sources_push(c_result, c_count, c_cap, path);
+}
+
 /*
- * Collect the target's .c sources from its PBXSourcesBuildPhase, in
- * project order, resolving each PBXBuildFile through its fileRef.  The
- * result is a NULL-terminated array the caller frees with free_sources;
- * NULL means the chain was unavailable or empty.
+ * Collect the target's sources from its PBXSourcesBuildPhase, in project
+ * order, resolving each PBXBuildFile through its fileRef and splitting
+ * .c from .swift.  Each result is a NULL-terminated array the caller
+ * frees with free_sources; NULL means the chain was unavailable or
+ * produced nothing.
  */
-static char **sources_via_build_phase(const struct pbx_node *objects,
-                                      const struct pbx_node *target,
-                                      const struct refmap *map)
+static int sources_via_build_phase(const struct pbx_node *objects,
+                                   const struct pbx_node *target,
+                                   const struct refmap *map,
+                                   char ***c_out, size_t *c_out_count,
+                                   char ***swift_out,
+                                   size_t *swift_out_count)
 {
     struct pbx_node *phases = pbx_dict_get(target, "buildPhases");
-    char **result = NULL;
-    size_t count = 0;
-    size_t cap = 0;
+    char **c_result = NULL;
+    char **swift_result = NULL;
+    size_t c_count = 0;
+    size_t c_cap = 0;
+    size_t swift_count = 0;
+    size_t swift_cap = 0;
     size_t i;
     size_t j;
 
     if (phases == NULL || phases->kind != PBX_ARRAY) {
-        return NULL;
+        return -1;
     }
 
     for (i = 0; i < phases->item_count; i++) {
@@ -793,70 +843,95 @@ static char **sources_via_build_phase(const struct pbx_node *objects,
             if (path == NULL) {
                 path = ref_id;
             }
-            if (!is_c_source(path)) {
+            if (!is_known_source(path)) {
                 continue;
             }
-            if (sources_push(&result, &count, &cap, path) != 0) {
+            if (sources_push_classified(&c_result, &c_count, &c_cap,
+                                        &swift_result, &swift_count,
+                                        &swift_cap, path) != 0) {
                 goto fail;
             }
         }
     }
 
-    if (result == NULL) {
-        return NULL;
+    if (c_result != NULL) {
+        c_result[c_count] = NULL;
     }
-    result[count] = NULL;
-    return result;
+    if (swift_result != NULL) {
+        swift_result[swift_count] = NULL;
+    }
+    *c_out = c_result;
+    *c_out_count = c_count;
+    *swift_out = swift_result;
+    *swift_out_count = swift_count;
+    return 0;
 
 fail:
-    if (result != NULL) {
-        size_t k;
-        for (k = 0; k < count; k++) {
-            free(result[k]);
-        }
-        free(result);
-    }
-    return NULL;
+    free_sources(c_result);
+    free_sources(swift_result);
+    return -1;
 }
 
 /*
  * Fallback for a project with no resolvable PBXSourcesBuildPhase: every
- * resolved file reference whose path names a .c file.
+ * resolved file reference naming a source Masa can build.
  */
-static char **sources_via_file_references(const struct refmap *map)
+static void sources_via_file_references(const struct refmap *map,
+                                        char ***c_out, size_t *c_out_count,
+                                        char ***swift_out,
+                                        size_t *swift_out_count)
 {
-    char **result = NULL;
-    size_t count = 0;
-    size_t cap = 0;
+    char **c_result = NULL;
+    char **swift_result = NULL;
+    size_t c_count = 0;
+    size_t c_cap = 0;
+    size_t swift_count = 0;
+    size_t swift_cap = 0;
     size_t i;
 
     for (i = 0; i < map->count; i++) {
-        if (!is_c_source(map->paths[i])) {
+        const char *path = map->paths[i];
+
+        if (!is_known_source(path)) {
             continue;
         }
-        if (sources_has(result, count, map->paths[i])) {
-            continue;
-        }
-        if (sources_push(&result, &count, &cap, map->paths[i]) != 0) {
-            goto fail;
+        if (is_swift_source(path)) {
+            if (sources_has(swift_result, swift_count, path)) {
+                continue;
+            }
+            if (sources_push(&swift_result, &swift_count, &swift_cap,
+                             path) != 0) {
+                goto fail;
+            }
+        } else {
+            if (sources_has(c_result, c_count, path)) {
+                continue;
+            }
+            if (sources_push(&c_result, &c_count, &c_cap, path) != 0) {
+                goto fail;
+            }
         }
     }
 
-    if (result == NULL) {
-        return NULL;
+    if (c_result != NULL) {
+        c_result[c_count] = NULL;
     }
-    result[count] = NULL;
-    return result;
+    if (swift_result != NULL) {
+        swift_result[swift_count] = NULL;
+    }
+    *c_out = c_result;
+    *c_out_count = c_count;
+    *swift_out = swift_result;
+    *swift_out_count = swift_count;
+    return;
 
 fail:
-    if (result != NULL) {
-        size_t k;
-        for (k = 0; k < count; k++) {
-            free(result[k]);
-        }
-        free(result);
-    }
-    return NULL;
+    free_sources(c_result);
+    free_sources(swift_result);
+    *c_out = NULL;
+    *c_out_count = 0;
+    *swift_out = NULL;
+    *swift_out_count = 0;
 }
 
 static void free_sources(char **sources)
@@ -882,6 +957,9 @@ void masa_pbxproj_free(struct masa_pbxproj *proj)
     free_sources(proj->sources);
     proj->sources = NULL;
     proj->source_count = 0;
+    free_sources(proj->swift_sources);
+    proj->swift_sources = NULL;
+    proj->swift_source_count = 0;
 }
 
 int masa_pbxproj_parse(const char *text, size_t len,
@@ -894,6 +972,9 @@ int masa_pbxproj_parse(const char *text, size_t len,
     struct refmap refmap;
     const char *name = NULL;
     char **sources = NULL;
+    size_t source_count = 0;
+    char **swift_sources = NULL;
+    size_t swift_source_count = 0;
     size_t i;
     int rc = -1;
 
@@ -996,25 +1077,30 @@ int masa_pbxproj_parse(const char *text, size_t len,
         return -1;
     }
 
-    sources = sources_via_build_phase(objects, target, &refmap);
-    if (sources == NULL) {
-        sources = sources_via_file_references(&refmap);
+    if (sources_via_build_phase(objects, target, &refmap, &sources,
+                                &source_count, &swift_sources,
+                                &swift_source_count) != 0) {
+        sources_via_file_references(&refmap, &sources, &source_count,
+                                    &swift_sources, &swift_source_count);
     }
     refmap_free(&refmap);
-    if (sources == NULL) {
+
+    if (source_count == 0 && swift_source_count == 0) {
+        free_sources(sources);
+        free_sources(swift_sources);
         pbx_free(root);
         masa_pbxproj_free(out);
         if (err != NULL && errcap > 0) {
-            snprintf(err, errcap, "PBXNativeTarget has no C sources");
+            snprintf(err, errcap,
+                     "PBXNativeTarget has no C or Swift sources");
         }
         return -1;
     }
 
-    for (i = 0; sources[i] != NULL; i++) {
-        /* count */
-    }
     out->sources = sources;
-    out->source_count = i;
+    out->source_count = source_count;
+    out->swift_sources = swift_sources;
+    out->swift_source_count = swift_source_count;
     rc = 0;
 
     pbx_free(root);
@@ -1134,58 +1220,111 @@ static const char *normalise_source(const char *path)
 }
 
 /*
- * Compile and link the target's sources into exe by handing them to the
- * Masa cc wrapper, which supplies the target triple, the SDK sysroot and
- * the LLVM linker.
+ * Compile and link the target's sources into exe.  A target with Swift
+ * files is handed to the swiftc wrapper (which supplies the target
+ * triple and SDK); a pure C target goes to the cc wrapper.  Both
+ * wrappers honour MASA_DRY_RUN, so the exact command can be inspected
+ * without a toolchain.
  */
 static int compile_and_link(const char *parent,
                             const struct masa_pbxproj *proj, const char *exe)
 {
-    char *args[MASA_CC_MAX_ARGS];
+    char *args[MASA_XCODE_MAX_ARGS];
     char **owned;
+    size_t total = proj->source_count + proj->swift_source_count;
     int count = 0;
     size_t i;
     int status;
+    int use_swift = (proj->swift_source_count > 0);
 
-    owned = calloc(proj->source_count, sizeof(*owned));
+    owned = calloc(total == 0 ? 1 : total, sizeof(*owned));
     if (owned == NULL) {
         return 1;
     }
 
-    for (i = 0; i < proj->source_count; i++) {
-        char joined[MASA_PATH_MAX];
-        const char *rel = normalise_source(proj->sources[i]);
+    /*
+     * A Swift target is compiled by swiftc.  Mixing C and Swift in one
+     * target would need a two-stage build, which Masa does not model, so
+     * only the Swift sources are built and the C files are reported.
+     */
+    if (use_swift && proj->source_count > 0) {
+        fprintf(stderr,
+                "masa: xcode: target mixes C and Swift sources; building "
+                "the Swift files only\n");
+    }
 
-        if (count >= MASA_CC_MAX_ARGS - 4) {
-            fprintf(stderr, "masa: xcode: too many sources\n");
-            goto fail;
+    if (use_swift) {
+        for (i = 0; i < proj->swift_source_count; i++) {
+            char joined[MASA_PATH_MAX];
+            const char *rel = normalise_source(proj->swift_sources[i]);
+
+            if (count >= MASA_XCODE_MAX_ARGS - 4) {
+                fprintf(stderr, "masa: xcode: too many sources\n");
+                goto fail;
+            }
+            if (snprintf(joined, sizeof(joined), "%s/%s", parent, rel) >=
+                (int)sizeof(joined)) {
+                fprintf(stderr,
+                        "masa: xcode: source path too long: %s\n", rel);
+                goto fail;
+            }
+            owned[i] = strdup(joined);
+            if (owned[i] == NULL) {
+                goto fail;
+            }
+            args[count++] = owned[i];
         }
-        if (snprintf(joined, sizeof(joined), "%s/%s", parent, rel) >=
-            (int)sizeof(joined)) {
-            fprintf(stderr, "masa: xcode: source path too long: %s\n", rel);
-            goto fail;
+    } else {
+        for (i = 0; i < proj->source_count; i++) {
+            char joined[MASA_PATH_MAX];
+            const char *rel = normalise_source(proj->sources[i]);
+
+            if (count >= MASA_XCODE_MAX_ARGS - 4) {
+                fprintf(stderr, "masa: xcode: too many sources\n");
+                goto fail;
+            }
+            if (snprintf(joined, sizeof(joined), "%s/%s", parent, rel) >=
+                (int)sizeof(joined)) {
+                fprintf(stderr,
+                        "masa: xcode: source path too long: %s\n", rel);
+                goto fail;
+            }
+            owned[i] = strdup(joined);
+            if (owned[i] == NULL) {
+                goto fail;
+            }
+            args[count++] = owned[i];
         }
-        owned[i] = strdup(joined);
-        if (owned[i] == NULL) {
-            goto fail;
-        }
-        args[count++] = owned[i];
     }
 
     args[count++] = (char *)"-o";
     args[count++] = (char *)exe;
     args[count] = NULL;
 
-    status = masa_cc_main(count, args);
+    if (use_swift) {
+        /* Fail clearly before swiftc is reached when it is unavailable. */
+        char *swiftc = masa_resolve_swiftc();
 
-    for (i = 0; i < proj->source_count; i++) {
+        if (swiftc == NULL && !dry_run_enabled()) {
+            fprintf(stderr,
+                    "masa: xcode: Swift sources need swiftc (set %s or "
+                    "install the Swift toolchain)\n", MASA_SWIFTC_ENV);
+            goto fail;
+        }
+        free(swiftc);
+        status = masa_swiftc_main(count, args);
+    } else {
+        status = masa_cc_main(count, args);
+    }
+
+    for (i = 0; i < total; i++) {
         free(owned[i]);
     }
     free(owned);
     return status;
 
 fail:
-    for (i = 0; i < proj->source_count; i++) {
+    for (i = 0; i < total; i++) {
         free(owned[i]);
     }
     free(owned);
@@ -1323,9 +1462,18 @@ static int xcode_build(int argc, char *const argv[])
         return 1;
     }
 
-    printf("masa: xcode: target '%s' (" MASA_SIZE_FMT " source%s)\n",
-           proj.product_name, MASA_SIZE_ARG(proj.source_count),
-           (proj.source_count == 1) ? "" : "s");
+    printf("masa: xcode: target '%s' (", proj.product_name);
+    if (proj.source_count > 0) {
+        printf(MASA_SIZE_FMT " source%s", MASA_SIZE_ARG(proj.source_count),
+               (proj.source_count == 1) ? "" : "s");
+    }
+    if (proj.swift_source_count > 0) {
+        printf("%s" MASA_SIZE_FMT " Swift source%s",
+               (proj.source_count > 0) ? ", " : "",
+               MASA_SIZE_ARG(proj.swift_source_count),
+               (proj.swift_source_count == 1) ? "" : "s");
+    }
+    printf(")\n");
 
     if (compile_and_link(parent, &proj, exe) != 0) {
         fprintf(stderr, "masa: xcode build: compilation failed\n");

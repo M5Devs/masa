@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+
+      - name: Build
+        run: make CC=${{ matrix.cc }}
+
+      - name: Test
+        run: make CC=${{ matrix.cc }} test
+
+      - name: Report version
+        run: ./build/masa version
+
+  # The same C11 sources must compile cleanly for Android with the NDK
+  # clang under -Wall -Wextra -Werror, and the NDK cross-build is driven
+  # by `make android`.  The NDK does not ship libasan, so this job builds
+  # without AddressSanitizer.
+  android:
+    name: android cross-compile (NDK)
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: r27c
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the Android NDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/android-ndk
+          key: android-ndk-${{ env.ANDROID_NDK_VERSION }}
+
+      - name: Install the Android NDK
+        run: |
+          set -e
+          NDK_DIR="$RUNNER_TEMP/android-ndk/android-ndk-${ANDROID_NDK_VERSION}"
+          if [ ! -d "$NDK_DIR" ]; then
+            mkdir -p "$RUNNER_TEMP/android-ndk"
+            curl -fsSL -o "$RUNNER_TEMP/ndk.zip" \
+              "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip"
+            unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP/android-ndk"
+          fi
+          echo "ANDROID_CC=$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Cross-compile for Android
+        run: make android
+
+      - name: Check the Android binary
+        run: file build/android/masa
+
+      - name: Test (with the Android NDK toolchain on hand)
+        run: |
+          make test
+          ANDROID_CC="$ANDROID_CC" ./build/test_masa
+
+  windows-cross:
+    name: windows cross-compile (mingw-w64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+
+      - name: Cross-compile for Windows
+        run: |
+          set -e
+          mkdir -p build/win
+          for f in src/main.c src/cc_wrapper.c src/swift_wrapper.c \
+                   src/sys_shims.c src/tool_shims.c src/sdk.c \
+                   src/xcodeproj.c src/brew.c src/exec.c \
+                   src/platform_win.c; do
+            x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
+              -c "$f" -o "build/win/$(basename "$f" .c).o"
+          done
+          x86_64-w64-mingw32-gcc -Iinclude build/win/*.o -o build/win/masa.exe
+          ls -l build/win/masa.exe

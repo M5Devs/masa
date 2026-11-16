@@ -324,6 +324,7 @@ static void reset_masa_env(void)
     set_env(MASA_DRY_RUN_ENV, NULL);
     set_env(MASA_CC_ENV, NULL);
     set_env(MASA_REAL_CC_ENV, NULL);
+    set_env(MASA_SWIFTC_ENV, NULL);
     set_env(MASA_SHIM_DIR_ENV, NULL);
     set_env(MASA_SHIM_TARGET_ENV, NULL);
     set_env(MASA_KEEP_PS1_ENV, NULL);
@@ -3231,6 +3232,521 @@ static void test_host_services_basics(void)
     }
     CHECK(masa_which("definitely-not-a-real-tool-xyz") == NULL);
 }
+/* ------------------------------------------------------------------ */
+/* Milestone 7: Swift support and Android cross-compilation           */
+/* ------------------------------------------------------------------ */
+
+static void test_build_swift_args_sequence(void)
+{
+    const char *args[16];
+    const char *expected[] = {"-target", "arm64-apple-macosx15.0",
+                              "-sdk", "/sdk"};
+    int count = 0;
+    int i;
+    int rc;
+
+    rc = masa_build_swift_args("arm64-apple-macosx15.0", "/sdk", args,
+                               &count, 16);
+    CHECK(rc == 0);
+    CHECK(count == 4);
+    for (i = 0; i < 4; i++) {
+        CHECK_STREQ(args[i], expected[i]);
+    }
+    CHECK(args[4] == NULL);
+}
+
+static void test_build_swift_args_appends_without_sdk(void)
+{
+    const char *args[16];
+    int count = 2;
+    int rc;
+
+    args[0] = "swiftc";
+    args[1] = "main.swift";
+    rc = masa_build_swift_args("x86_64-apple-macosx14.0", NULL, args, &count,
+                               16);
+    CHECK(rc == 0);
+    CHECK(count == 4);
+    CHECK_STREQ(args[0], "swiftc");
+    CHECK_STREQ(args[1], "main.swift");
+    CHECK_STREQ(args[2], "-target");
+    CHECK_STREQ(args[3], "x86_64-apple-macosx14.0");
+    CHECK(args[4] == NULL);
+}
+
+static void test_build_swift_args_empty_sdk_skipped(void)
+{
+    const char *args[16];
+    int count = 0;
+    int rc;
+
+    rc = masa_build_swift_args("arm64-apple-macosx15.0", "", args, &count, 16);
+    CHECK(rc == 0);
+    CHECK(count == 2);
+    CHECK_STREQ(args[0], "-target");
+    CHECK_STREQ(args[1], "arm64-apple-macosx15.0");
+}
+
+static void test_build_swift_args_rejects_bad_input(void)
+{
+    const char *args[16];
+    int count = 0;
+
+    CHECK(masa_build_swift_args(NULL, NULL, args, &count, 16) == -1);
+    CHECK(masa_build_swift_args("", NULL, args, &count, 16) == -1);
+    CHECK(masa_build_swift_args("arm64-apple-macosx15.0", NULL, NULL,
+                                &count, 16) == -1);
+    CHECK(masa_build_swift_args("arm64-apple-macosx15.0", NULL, args, NULL,
+                                16) == -1);
+    /* Only one slot free: not enough for -target + value + terminator. */
+    count = 15;
+    CHECK(masa_build_swift_args("arm64-apple-macosx15.0", NULL, args, &count,
+                                16) == -1);
+}
+
+/* The swiftc wrapper appends -target and, when configured, -sdk. */
+static void test_swiftc_dry_run_target_and_sdk(void)
+{
+    char *argv[] = {"masa", "swiftc", "-O", "main.swift", NULL};
+    char out[1024];
+    char expected[1024];
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_SWIFTC_ENV, "myswiftc");
+    set_env(MASA_TARGET_ENV, "arm64-apple-macosx15.0");
+    set_env(MASA_SDK_PATH_ENV, "/sdk");
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    snprintf(expected, sizeof(expected),
+             "myswiftc -O main.swift -target arm64-apple-macosx15.0"
+             " -sdk /sdk\n");
+    CHECK_STREQ(out, expected);
+
+    reset_masa_env();
+}
+
+/* Without MASA_TARGET the Swift default triple is used, and -sdk is
+ * omitted because no SDK root is configured. */
+static void test_swiftc_dry_run_default_target(void)
+{
+    char *argv[] = {"masa", "swiftc", "main.swift", NULL};
+    char out[1024];
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_SWIFTC_ENV, "swiftc");
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "-target " MASA_DEFAULT_SWIFT_TARGET);
+    CHECK(strstr(out, "-sdk") == NULL);
+
+    reset_masa_env();
+}
+
+/* argv[0] == "swift" / "swiftc" drives the Swift wrapper directly. */
+static void test_argv0_dispatch_swift(void)
+{
+    char *argv_swift[] = {"/some/dir/swift", "main.swift", NULL};
+    char *argv_swiftc[] = {"/some/dir/swiftc", "-c", "main.swift", NULL};
+    char out[1024];
+    int rc;
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_SWIFTC_ENV, "swiftc");
+
+    rc = run_masa(argv_swift, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "swiftc main.swift");
+    CHECK_CONTAINS(out, "-target " MASA_DEFAULT_SWIFT_TARGET);
+
+    rc = run_masa(argv_swiftc, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "swiftc -c main.swift");
+
+    reset_masa_env();
+}
+
+/* `masa swift info` reads a Package.swift manifest. */
+static void test_swift_info_package(void)
+{
+    char dir[] = "/tmp/masa_swift_info_XXXXXX";
+    char manifest[512];
+    char sources[512];
+    char *argv[5];
+    char out[1024];
+    char err[512];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(manifest, sizeof(manifest), "%s/Package.swift", dir);
+    snprintf(sources, sizeof(sources), "%s/Sources", dir);
+    if (mkdir(sources, 0755) != 0 ||
+        write_file(manifest,
+                   "// swift-tools-version:5.9\n"
+                   "import PackageDescription\n"
+                   "let package = Package(\n"
+                   "    name: \"DemoKit\",\n"
+                   "    targets: [.target(name: \"DemoKit\")]\n"
+                   ")\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write the manifest\n");
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+    argv[0] = "masa";
+    argv[1] = "swift";
+    argv[2] = "info";
+    argv[3] = dir;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "DemoKit");
+    CHECK_CONTAINS(out, "Sources/");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* A file that is not a manifest is rejected with a clear message. */
+static void test_swift_info_rejects_non_manifest(void)
+{
+    char dir[] = "/tmp/masa_swift_bad_XXXXXX";
+    char manifest[512];
+    char *argv[5];
+    char out[512];
+    char err[512];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(manifest, sizeof(manifest), "%s/Package.swift", dir);
+    if (write_file(manifest, "int main(void) { return 0; }\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write the manifest\n");
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+    argv[0] = "masa";
+    argv[1] = "swift";
+    argv[2] = "info";
+    argv[3] = dir;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "not a Package.swift");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_swift_missing_package(void)
+{
+    char dir[] = "/tmp/masa_swift_none_XXXXXX";
+    char *argv[5];
+    char out[512];
+    char err[512];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    reset_masa_env();
+    argv[0] = "masa";
+    argv[1] = "swift";
+    argv[2] = "info";
+    argv[3] = dir;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "cannot find");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* `masa swift build` hands the manifest to swiftc with -target. */
+static void test_swift_build_dry_run(void)
+{
+    char dir[] = "/tmp/masa_swift_build_XXXXXX";
+    char manifest[512];
+    char *argv[5];
+    char out[1024];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(manifest, sizeof(manifest), "%s/Package.swift", dir);
+    if (write_file(manifest,
+                   "// swift-tools-version:5.9\n"
+                   "import PackageDescription\n"
+                   "let package = Package(name: \"DemoKit\")\n") != 0) {
+        fprintf(stderr, "  FAIL cannot write the manifest\n");
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_SWIFTC_ENV, "swiftc");
+
+    argv[0] = "masa";
+    argv[1] = "swift";
+    argv[2] = "build";
+    argv[3] = dir;
+    argv[4] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "swiftc");
+    CHECK_CONTAINS(out, "Package.swift");
+    CHECK_CONTAINS(out, "-target " MASA_DEFAULT_SWIFT_TARGET);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+static void test_swift_unknown_subcommand(void)
+{
+    char *argv[] = {"masa", "swift", "frobnicate", NULL};
+    char err[512];
+    int rc;
+
+    reset_masa_env();
+    rc = run_masa(argv, NULL, 0, err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "unknown subcommand");
+
+    reset_masa_env();
+}
+
+/* A target that compiles .swift files is handed to swiftc. */
+static void test_pbxproj_parse_swift_sources(void)
+{
+    static const char *swift_project =
+        "{\n"
+        "  objects = {\n"
+        "    T1 = {isa = PBXNativeTarget; name = SwiftApp;"
+        " productName = SwiftApp; buildPhases = (P1); };\n"
+        "    P1 = {isa = PBXSourcesBuildPhase; files = (F1, F2, F3); };\n"
+        "    F1 = {isa = PBXBuildFile; fileRef = R1; };\n"
+        "    F2 = {isa = PBXBuildFile; fileRef = R2; };\n"
+        "    F3 = {isa = PBXBuildFile; fileRef = R3; };\n"
+        "    R1 = {isa = PBXFileReference; path = main.swift; };\n"
+        "    R2 = {isa = PBXFileReference; path = helper.swift; };\n"
+        "    R3 = {isa = PBXFileReference; path = support.c; };\n"
+        "  };\n"
+        "  rootObject = T1;\n"
+        "}\n";
+    struct masa_pbxproj proj;
+    char err[256];
+    int rc;
+    size_t i;
+    int saw_main = 0;
+    int saw_helper = 0;
+    int saw_c = 0;
+
+    memset(&proj, 0, sizeof(proj));
+    rc = masa_pbxproj_parse(swift_project, strlen(swift_project), &proj, err,
+                            sizeof(err));
+    CHECK(rc == 0);
+    if (rc != 0) {
+        fprintf(stderr, "  parse error: %s\n", err);
+        return;
+    }
+    CHECK_STREQ(proj.product_name, "SwiftApp");
+    CHECK(proj.swift_source_count == 2);
+    CHECK(proj.source_count == 1);
+    for (i = 0; i < proj.swift_source_count; i++) {
+        if (strcmp(proj.swift_sources[i], "main.swift") == 0) {
+            saw_main = 1;
+        }
+        if (strcmp(proj.swift_sources[i], "helper.swift") == 0) {
+            saw_helper = 1;
+        }
+    }
+    for (i = 0; i < proj.source_count; i++) {
+        if (strcmp(proj.sources[i], "support.c") == 0) {
+            saw_c = 1;
+        }
+    }
+    CHECK(saw_main);
+    CHECK(saw_helper);
+    CHECK(saw_c);
+
+    masa_pbxproj_free(&proj);
+}
+
+/* `masa xcode build` on a Swift project drives swiftc (checked in dry
+ * run, so no Swift toolchain is required). */
+static void test_xcode_build_swift_dry_run(void)
+{
+    char dir[] = "/tmp/masa_xcode_swift_XXXXXX";
+    char proj[512];
+    char src[512];
+    char pbx[4096];
+    char out_dir[4096];
+    char *argv[10];
+    char out[1024];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(proj, sizeof(proj), "%s/SwiftApp.xcodeproj", dir);
+    snprintf(pbx, sizeof(pbx), "%s/project.pbxproj", proj);
+    snprintf(src, sizeof(src), "%s/src", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+
+    if (mkdir(proj, 0755) != 0 || mkdir(src, 0755) != 0) {
+        fprintf(stderr, "  FAIL cannot create the project tree\n");
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    {
+        char main_swift[4096];
+
+        snprintf(main_swift, sizeof(main_swift), "%s/main.swift", src);
+        if (write_file(main_swift, "print(\"hi\")\n") != 0 ||
+            write_file(pbx,
+                       "{\n"
+                       "  objects = {\n"
+                       "    T1 = {isa = PBXNativeTarget; name = SwiftApp;"
+                       " productName = SwiftApp; buildPhases = (P1); };\n"
+                       "    P1 = {isa = PBXSourcesBuildPhase;"
+                       " files = (F1); };\n"
+                       "    F1 = {isa = PBXBuildFile; fileRef = R1; };\n"
+                       "    R1 = {isa = PBXFileReference;"
+                       " path = main.swift; };\n"
+                       "  };\n"
+                       "  rootObject = T1;\n"
+                       "}\n") != 0) {
+            fprintf(stderr, "  FAIL cannot write the Swift project\n");
+            g_failed++;
+            remove_tree(dir);
+            return;
+        }
+    }
+
+    reset_masa_env();
+    set_env(MASA_DRY_RUN_ENV, "1");
+    set_env(MASA_SWIFTC_ENV, "swiftc");
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "--bundle";
+    argv[5] = "-o";
+    argv[6] = out_dir;
+    argv[7] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), NULL, 0);
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "swiftc");
+    CHECK_CONTAINS(out, "main.swift");
+    CHECK_CONTAINS(out, "-target");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * The Android NDK target compiles every source without warnings.  The
+ * test only runs when an NDK toolchain is on PATH, so the suite stays
+ * green on hosts that do not have one.
+ */
+static void test_android_ndk_compile(void)
+{
+    static const char *sources[] = {
+        "src/main.c", "src/cc_wrapper.c", "src/swift_wrapper.c",
+        "src/sys_shims.c", "src/tool_shims.c", "src/sdk.c",
+        "src/xcodeproj.c", "src/brew.c", "src/exec.c",
+        "src/platform_posix.c"
+    };
+    const char *ndk_cc = getenv("ANDROID_CC");
+    char cmd[8192];
+    size_t used;
+    size_t i;
+    int rc;
+
+    if (ndk_cc == NULL || ndk_cc[0] == '\0') {
+        printf("  SKIP ANDROID_CC (NDK clang) is not available\n");
+        g_skipped++;
+        return;
+    }
+    if (strchr(ndk_cc, '/') != NULL) {
+        if (access(ndk_cc, X_OK) != 0) {
+            printf("  SKIP ANDROID_CC points at a missing tool\n");
+            g_skipped++;
+            return;
+        }
+    } else if (!tool_available(ndk_cc)) {
+        printf("  SKIP ANDROID_CC (NDK clang) is not available\n");
+        g_skipped++;
+        return;
+    }
+
+    used = (size_t)snprintf(cmd, sizeof(cmd),
+                            "%s -std=c11 -Wall -Wextra -Werror -Iinclude",
+                            ndk_cc);
+    for (i = 0; i < sizeof(sources) / sizeof(sources[0]); i++) {
+        int n = snprintf(cmd + used, sizeof(cmd) - used, " %s", sources[i]);
+
+        if (n < 0 || (size_t)n >= sizeof(cmd) - used) {
+            fprintf(stderr, "  FAIL command line too long\n");
+            g_failed++;
+            return;
+        }
+        used += (size_t)n;
+    }
+    {
+        int n = snprintf(cmd + used, sizeof(cmd) - used, " -o /tmp/masa_ndk_test");
+
+        if (n < 0 || (size_t)n >= sizeof(cmd) - used) {
+            fprintf(stderr, "  FAIL command line too long\n");
+            g_failed++;
+            return;
+        }
+    }
+
+    rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "  NDK compile failed (status %d)\n", rc);
+    }
+    CHECK(rc == 0);
+
+    unlink("/tmp/masa_ndk_test");
+}
 
 /* ------------------------------------------------------------------ */
 /* main                                                               */
@@ -3325,6 +3841,22 @@ int main(void)
     RUN(test_shell_propagates_exit_status);
     RUN(test_shell_missing_command_argument);
     RUN(test_shell_interactive_reads_stdin);
+
+    RUN(test_build_swift_args_sequence);
+    RUN(test_build_swift_args_appends_without_sdk);
+    RUN(test_build_swift_args_empty_sdk_skipped);
+    RUN(test_build_swift_args_rejects_bad_input);
+    RUN(test_swiftc_dry_run_target_and_sdk);
+    RUN(test_swiftc_dry_run_default_target);
+    RUN(test_argv0_dispatch_swift);
+    RUN(test_swift_info_package);
+    RUN(test_swift_info_rejects_non_manifest);
+    RUN(test_swift_missing_package);
+    RUN(test_swift_build_dry_run);
+    RUN(test_swift_unknown_subcommand);
+    RUN(test_pbxproj_parse_swift_sources);
+    RUN(test_xcode_build_swift_dry_run);
+    RUN(test_android_ndk_compile);
 
     printf("\n%d tests run, %d failed, %d skipped\n",
            g_run, g_failed, g_skipped);

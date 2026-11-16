@@ -9,13 +9,15 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 6 (v0.6.0): an interactive `masa shell` that drops you inside the
-full shim environment, and a portable host-services layer. Process spawning,
-temporary directories, `PATH` lookup, environment mutation and shim creation
-now live behind a small platform interface, with a POSIX backend
-(`src/platform_posix.c`, covering Linux and Android/Termux) and a Windows
-backend (`src/platform_win.c`, using `CreateProcess` and MinGW-w64). This sits
-on the Milestone 5 Homebrew formula linter and builder (`masa brew`), the
+Milestone 7 (v0.7.0): Swift toolchain support and Android cross-compilation.
+A new `swiftc` wrapper (`masa swiftc`, and the `swift`/`swiftc` `argv[0]`
+shims) injects the target triple and, when configured, the SDK root, and
+`masa swift build|info` reads a `Package.swift` manifest. The Xcode builder
+now recognises `.swift` sources and hands a Swift target to `swiftc`. Every
+C11 source also compiles cleanly for Android with the NDK clang
+(`make android`, `ANDROID_CC`), and CI builds it. This sits on the
+Milestone 6 interactive `masa shell` and portable host-services layer, the
+Milestone 5 Homebrew formula linter and builder (`masa brew`), the
 Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3
 full Mach-O executable linking, toolchain shims and `masa sdk`, and the
 Milestone 2 `argv[0]` dispatch and `masa exec` environment runner, which in
@@ -29,6 +31,10 @@ turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
   are used by the corresponding shims.
 - No Apple SDK is required. `masa sdk init-stub` writes a clean-room stub SDK
   that is enough to link real Mach-O executables.
+- Optional: a Swift toolchain (`swiftc`) for the Swift wrapper and for Xcode
+  projects whose target compiles `.swift` files.
+- Optional: the Android NDK (`aarch64-linux-android24-clang`) to cross-compile
+  Masa itself for Android (`make android`).
 
 ## Building
 
@@ -41,26 +47,37 @@ make clean
 Sources are compiled with `-std=c11 -Wall -Wextra -Werror -fsanitize=address`,
 so the build fails on any warning and the tests run under AddressSanitizer.
 
+To cross-compile Masa for Android with the NDK (no AddressSanitizer, which the
+NDK does not ship):
+
+```sh
+make android ANDROID_CC=/path/to/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+```
+
 ## Portability
 
 Masa builds on any POSIX host (Linux, and Android/Termux via the `/system/bin`
 shell and `$TMPDIR`), and on Windows through MinGW-w64. The Makefile picks the
 host-services backend automatically: `src/platform_posix.c` everywhere except
-native Windows, where `src/platform_win.c` is used. The Windows binary can be
-cross-compiled from Linux:
+native Windows, where `src/platform_win.c` is used. The POSIX sources compile
+cleanly for Android with the NDK clang, which CI verifies. The Windows binary
+can be cross-compiled from Linux:
 
 ```sh
 # build the Windows binary (note: platform_posix.c is left out)
 x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
-  src/main.c src/cc_wrapper.c src/sys_shims.c src/tool_shims.c \
-  src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/platform_win.c \
-  -o masa.exe
+  src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c \
+  src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c \
+  src/platform_win.c -o masa.exe
 ```
 
 ## Usage
 
 ```
 masa cc [clang-options...]    Compile or link for macOS with clang
+masa swiftc [swift-options...] Compile or link for macOS with swiftc
+masa swift info [dir]         Report a Package.swift's name and layout
+masa swift build [dir]        Build a Swift package with swiftc
 masa sys <command> [args...]  Run a shimmed Darwin command
 masa exec <command> [args...] Run a command inside a shimmed environment
 masa shell [-c <command>]     Interactive shell in the shim environment
@@ -97,6 +114,36 @@ MASA_TARGET=x86_64-apple-darwin masa cc -c hello.c -o hello.o
 # Link a real Mach-O executable against the stub SDK.
 masa sdk init-stub /opt/masa/sdk
 MASA_SDK_PATH=/opt/masa/sdk masa cc hello.c -o hello
+```
+
+### `masa swift`
+
+`masa swiftc` (and the `swift`/`swiftc` `argv[0]` shims) forwards to the host
+Swift compiler and injects the cross-compilation flags:
+
+- `-target <MASA_TARGET>` (default `arm64-apple-macosx15.0`)
+- `-sdk <MASA_SDK_PATH>` when `MASA_SDK_PATH` is set, since `swiftc` takes the
+  sysroot through `-sdk` rather than `-isysroot`
+
+The host compiler is taken from `MASA_SWIFTC` when set, otherwise `swiftc` is
+looked up on `PATH`.
+
+```sh
+# Inspect the command without running it.
+MASA_DRY_RUN=1 masa swiftc -O main.swift -o app
+# swiftc -O main.swift -o app -target arm64-apple-macosx15.0
+```
+
+`masa swift info [dir]` reads the `Package.swift` in `dir` (default `.`) and
+reports the package name and whether a conventional `Sources/` tree exists;
+`masa swift build [dir]` hands the manifest to `swiftc`:
+
+```sh
+masa swift info
+# Package.swift: ./Package.swift
+# name:          DemoKit
+# root:          .
+# sources:       yes (Sources/)
 ```
 
 ### `masa exec`, `masa shell` and `masa init-shims`
@@ -220,10 +267,13 @@ MASA_SDK_PATH=/opt/masa/sdk masa xcode build DemoApp.xcodeproj
 The parser is a clean-room recursive-descent reader for the old-style ASCII
 plist grammar the format uses. It finds the `PBXNativeTarget`, takes its
 `productName`, and follows `PBXSourcesBuildPhase` → `PBXBuildFile` →
-`PBXFileReference` to collect the `.c` files the target compiles. Paths are
+`PBXFileReference` to collect the source files the target compiles. Paths are
 resolved through the `PBXGroup` tree, so a source in a `src` group is joined
-back to `src/main.c`. The files are then compiled and linked through the Masa
-`cc` wrapper, which supplies the target triple, the SDK sysroot and `ld64.lld`.
+back to `src/main.c`. `.c` files are compiled and linked through the Masa `cc`
+wrapper, which supplies the target triple, the SDK sysroot and `ld64.lld`.
+A target whose sources are `.swift` is handed to the Swift wrapper instead
+(see `masa swift`). A target that mixes both kinds is compiled with `swiftc`
+and warns, since Masa does not model a two-stage build.
 
 Options:
 
@@ -314,8 +364,10 @@ Shims the platform queries that build systems use to detect macOS:
 | --------------- | ------------------------------------------------------ |
 | `MASA_TARGET`   | Target triple (default `arm64-apple-darwin`)           |
 | `MASA_SDK_PATH` | SDK root used for `-isysroot` and reported by the shims |
-| `MASA_DRY_RUN`  | `1` prints the `cc` command instead of executing it    |
+| `MASA_DRY_RUN`  | `1` prints the `cc`/`swiftc` command instead of running it |
+| `ANDROID_CC`    | NDK clang used by `make android` and the NDK test      |
 | `MASA_CC`       | Compiler invoked by the wrapper (default `clang`)      |
+| `MASA_SWIFTC`   | Swift compiler the `swift`/`swiftc` shims forward to   |
 | `MASA_REAL_CC`  | Host compiler the `cc` shim must forward to            |
 | `MASA_SHIM_DIR` | Directory holding the `argv[0]` shims                  |
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
@@ -330,6 +382,7 @@ include/masa.h         public interface
 include/masa_compat.h  portability shims (dirent, mkdir -p, ...)
 src/main.c             CLI router and argv[0] dispatch
 src/cc_wrapper.c       clang wrapper and argument injection
+src/swift_wrapper.c    swiftc wrapper, Package.swift reader and `masa swift`
 src/sys_shims.c        uname / sw_vers / xcode-select / xcrun shims
 src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims and codesign
 src/sdk.c              sdk info and the clean-room stub SDK writer
@@ -344,8 +397,8 @@ tests/test_masa.c      unit tests
 ## Testing
 
 `make test` covers the argument builder, every shim, the CLI router,
-`argv[0]` dispatch, `init-shims`, `exec`, `shell`, `sdk`, `xcode`, `brew`, the
-toolchain shims, `codesign`, and compiler-recursion safety.
+`argv[0]` dispatch, `init-shims`, `exec`, `shell`, `sdk`, `xcode`, `brew`,
+`swift`, the toolchain shims, `codesign`, and compiler-recursion safety.
 
 End-to-end tests produce real Mach-O files and check the header bytes: the
 magic number (`CF FA ED FE`) and, for linked output, the file type
@@ -366,8 +419,16 @@ checking the shim environment is installed (shim directory first on `PATH`,
 `MASA_SHIM_DIR`/`MASA_REAL_CC` exported, `TERM` defaulted) and that `uname`
 inside the shell reports `Darwin`, and exercise the host-services layer
 (`masa_path_separator`, `masa_shell_path`, `masa_make_temp_dir`, `masa_which`).
+The Milestone 7 tests build the `swiftc` argument list, check the wrapper
+injects `-target`/`-sdk` (and the Swift default triple) in dry-run mode,
+dispatch the `swift`/`swiftc` `argv[0]` shims, read a generated `Package.swift`
+(reporting the name and `Sources/` tree, and rejecting a non-manifest without
+leaks), drive `masa swift build`, and confirm the Xcode builder routes a
+`.swift` target to `swiftc`. A separate test compiles every source for Android
+with the NDK clang (`ANDROID_CC`) when one is available, and skips otherwise.
 Tests that need `clang` or `make` skip themselves when the tool is absent.
 
-A GitHub Actions workflow (`.github/workflows/build.yml`) builds and tests with
-both `gcc` and `clang` on Linux, and cross-compiles the Windows backend with
-MinGW-w64 (`-Wall -Wextra -Werror`).
+A GitHub Actions workflow (`.github/workflows/ci.yml`) builds and tests with
+both `gcc` and `clang` on Linux, cross-compiles the Windows backend with
+MinGW-w64, and cross-compiles for Android with the NDK (`-Wall -Wextra
+-Werror`).

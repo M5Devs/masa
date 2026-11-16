@@ -26,6 +26,7 @@ static void print_usage(FILE *out, const char *prog)
             "\n"
             "Usage:\n"
             "  %s cc [clang-options...]    Compile or link for macOS with clang\n"
+            "  %s swiftc [swift-options...] Compile or link for macOS with swiftc\n"
             "  %s sys <command> [args...]  Run a shimmed Darwin command\n"
             "  %s exec <command> [args...] Run a command inside a shimmed environment\n"
             "  %s shell [-c <command>]     Interactive shell in the shim environment\n"
@@ -37,6 +38,8 @@ static void print_usage(FILE *out, const char *prog)
             "  %s brew lint <formula.rb>   Lint a Homebrew formula\n"
             "  %s brew build <formula.rb> --source <dir> [--prefix <dir>]\n"
             "                              Build a Homebrew formula into a Cellar\n"
+            "  %s swift build [dir]        Build a Swift package (or swiftc wrapper)\n"
+            "  %s swift info [dir]         Report a Package.swift's name and layout\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -45,16 +48,19 @@ static void print_usage(FILE *out, const char *prog)
             "  MASA_SDK_PATH   SDK root passed to -isysroot and reported by shims\n"
             "  MASA_DRY_RUN    set to 1 to print the cc command instead of running it\n"
             "  MASA_REAL_CC    host compiler the cc shim must forward to\n"
+            "  MASA_SWIFTC     host swift compiler the swift shims forward to\n"
             "  MASA_SHIM_DIR   directory holding the argv[0] shims\n"
             "  MASA_BREW_PREFIX  prefix for `masa brew build` (default: %s)\n"
             "  MASA_KEEP_PS1   set to 1 so `masa shell` keeps the caller's prompt\n"
             "\n"
             "When invoked as one of the shim names below, Masa acts as that\n"
             "command directly (create the links with `masa init-shims <dir>`):\n"
-            "  cc, clang, gcc, uname, sw_vers, xcode-select, xcrun,\n"
+            "  cc, clang, gcc, swift, swiftc, uname, sw_vers, xcode-select, xcrun,\n"
             "  ld, ar, ranlib, strip, nm, otool, codesign\n",
-            MASA_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog, prog, MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
+            MASA_VERSION,
+            prog, prog, prog, prog, prog, prog, prog, prog,
+            prog, prog, prog, prog, prog, prog, prog,
+            MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
 static int cmd_version(void)
@@ -95,6 +101,9 @@ static int dispatch_argv0(const char *name, int argc, char *const argv[])
         strcmp(name, "gcc") == 0) {
         return masa_cc_main(argc - 1, &argv[1]);
     }
+    if (strcmp(name, "swiftc") == 0 || strcmp(name, "swift") == 0) {
+        return masa_swiftc_main(argc - 1, &argv[1]);
+    }
     if (strcmp(name, "uname") == 0 ||
         strcmp(name, "sw_vers") == 0 ||
         strcmp(name, "xcode-select") == 0 ||
@@ -132,6 +141,9 @@ int masa_main(int argc, char *const argv[])
 
     if (strcmp(command, "cc") == 0) {
         return masa_cc_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "swiftc") == 0) {
+        return masa_swiftc_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "sys") == 0) {
         if (argc < 3 || argv[2] == NULL) {
@@ -177,6 +189,9 @@ int masa_main(int argc, char *const argv[])
             return 2;
         }
         return masa_brew_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "swift") == 0) {
+        return masa_swift_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

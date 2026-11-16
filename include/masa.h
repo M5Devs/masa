@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.6.0"
+#define MASA_VERSION "0.7.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -168,6 +168,69 @@ char *masa_resolve_cc(void);
 int masa_cc_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
+/* Swift wrapper (src/swift_wrapper.c)                                */
+/* ------------------------------------------------------------------ */
+
+/* Default Swift target when MASA_TARGET is not set. */
+#define MASA_DEFAULT_SWIFT_TARGET "arm64-apple-macosx15.0"
+
+/* Environment variable naming the host Swift compiler. */
+#define MASA_SWIFTC_ENV "MASA_SWIFTC"
+
+/* A parsed Package.swift manifest: the package name and whether a
+ * conventional Sources/<name> tree exists next to it. */
+struct masa_package {
+    char *name;        /* package name, or NULL when none was found */
+    char *root;        /* directory holding Package.swift */
+    int has_sources;   /* 1 when a Sources/ directory exists */
+};
+
+/*
+ * Append the cross-compilation arguments for swiftc to argv: the target
+ * triple and, when an SDK is configured, the sysroot.  swiftc takes the
+ * SDK through `-sdk` (not `-isysroot`), so the two wrappers differ here.
+ * argv must have room for at least 4 more entries.
+ *
+ * Returns 0 on success and -1 when an argument is missing or the array
+ * would overflow.
+ */
+int masa_build_swift_args(const char *target, const char *sdk_path,
+                          const char *args[], int *count, int max_args);
+
+/*
+ * Resolve the host Swift compiler.  MASA_SWIFTC wins when set; otherwise
+ * PATH is searched for swiftc.  Returns a malloc'd path the caller frees,
+ * or NULL when none was found.
+ */
+char *masa_resolve_swiftc(void);
+
+/*
+ * Read and lightly parse the Package.swift at path (Swift Package
+ * Manager manifest).  Fills *out with the package name and whether a
+ * Sources/ directory sits next to the manifest.  Returns 0 on success
+ * and -1 when the file is missing or clearly not a manifest, writing a
+ * reason into err (when errcap > 0).
+ */
+int masa_package_parse(const char *path, struct masa_package *out,
+                       char *err, size_t errcap);
+
+/* Release the memory owned by a parsed package (safe on a zeroed struct). */
+void masa_package_free(struct masa_package *pkg);
+
+/*
+ * Run the swiftc wrapper for the given compiler arguments (argc may be
+ * 0).  Reads MASA_TARGET, MASA_SDK_PATH and MASA_DRY_RUN from the
+ * environment.  Returns the process exit status, or 1 on failure.
+ */
+int masa_swiftc_main(int argc, char *const argv[]);
+
+/*
+ * `masa swift <info|build> [dir]` - inspect or build a Swift package
+ * using the swiftc wrapper.  Returns the process exit status.
+ */
+int masa_swift_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
 /* Darwin environment shims (src/sys_shims.c)                         */
 /* ------------------------------------------------------------------ */
 
@@ -279,16 +342,19 @@ int masa_shell_main(int argc, char *const argv[]);
 
 /*
  * Parsed view of the parts of a project.pbxproj the builder needs: the
- * native target's product name and the list of source files (relative to
- * the .xcodeproj parent directory) it compiles.
+ * native target's product name and the source files (relative to the
+ * .xcodeproj parent directory) it compiles, split into C and Swift
+ * translation units so each can be handed to the right compiler.
  *
  * Both arrays are owned by the struct and released by
  * masa_pbxproj_free(); sources are NUL-terminated strings.
  */
 struct masa_pbxproj {
-    char *product_name;   /* PBXNativeTarget productName, or NULL */
-    char **sources;       /* PBXBuildFile/PBXFileReference .c paths */
+    char *product_name;        /* PBXNativeTarget productName, or NULL */
+    char **sources;            /* PBXBuildFile/PBXFileReference .c paths */
     size_t source_count;
+    char **swift_sources;      /* PBXBuildFile/PBXFileReference .swift paths */
+    size_t swift_source_count;
 };
 
 /*

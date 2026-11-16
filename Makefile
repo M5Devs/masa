@@ -28,15 +28,27 @@ endif
 
 HEADERS := include/masa.h include/masa_compat.h
 
-SRC     := src/main.c src/cc_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c $(PLATFORM_SRC)
+SRC     := src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c $(PLATFORM_SRC)
 OBJ     := $(SRC:src/%.c=$(OBJDIR)/%.o)
 
 TEST_SRC := tests/test_masa.c $(SRC)
 TEST_CFLAGS := -DMASA_NO_MAIN
 
-.PHONY: all test clean run
+.PHONY: all test clean run android
+
+# Android NDK cross-compile: `make android` builds an aarch64-linux-android
+# binary with the NDK toolchain (override with ANDROID_CC).  The NDK does
+# not ship libasan by default, so AddressSanitizer is left off here; the
+# plain `make`/`make test` targets keep it on for host runs.
+ANDROID_CC     ?= aarch64-linux-android24-clang
+ANDROID_CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude
+ANDROID_BIN    := build/android/masa
 
 all: $(BIN)
+
+android: $(SRC) $(HEADERS)
+	mkdir -p $(dir $(ANDROID_BIN))
+	$(ANDROID_CC) $(ANDROID_CFLAGS) $(SRC) -o $(ANDROID_BIN)
 
 $(OBJDIR)/%.o: src/%.c $(HEADERS) | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
