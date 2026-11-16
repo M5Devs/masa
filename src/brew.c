@@ -244,6 +244,32 @@ static char *expand_interp(const char *s, const char *prefix, const char *bin,
 /* ------------------------------------------------------------------ */
 
 /*
+ * Does a single-string `system "..."` need a shell to interpret it?
+ *
+ * Ruby's Kernel#system runs a one-string command through `/bin/sh -c`,
+ * so spaces separate words and metacharacters (`|`, `>`, `$`, `*`, ...)
+ * take on their shell meaning.  A multi-argument `system "prog", "arg"`
+ * runs the program directly instead.  A one-string command with neither
+ * spaces nor metacharacters is a single bare word and is left on the
+ * direct-exec path.
+ */
+static int command_needs_shell(const char *cmd)
+{
+    static const char *meta = "|&;<>()$`\\\"'*?[]{}~#!";
+    size_t i;
+
+    for (i = 0; cmd[i] != '\0'; i++) {
+        if (cmd[i] == ' ' || cmd[i] == '\t' || cmd[i] == '\n') {
+            return 1;
+        }
+        if (strchr(meta, cmd[i]) != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
  * Split the argument list of a `system` call into tokens.  Each token is
  * either a double-quoted string or a bare word up to the next comma.
  * Returns a NULL-terminated array of fresh strings, or NULL on failure.
@@ -593,6 +619,10 @@ int masa_brew_formula_parse(const char *text, size_t len,
                     out->steps[out->step_count].argv = argv;
                     out->steps[out->step_count].argc = count;
                     out->steps[out->step_count].prog = argv[0];
+                    /* A lone `system "..."` with spaces/metachars is a
+                     * shell command (Ruby runs it via /bin/sh -c). */
+                    out->steps[out->step_count].use_shell =
+                        (count == 1 && command_needs_shell(argv[0]));
                     out->step_count++;
                 } else {
                     free(argv);
@@ -848,6 +878,40 @@ static int run_install_steps(const char *source_dir,
 
     for (i = 0; i < f->step_count; i++) {
         const struct masa_brew_step *step = &f->steps[i];
+
+        if (step->use_shell) {
+            /*
+             * A single-string `system "..."` runs through the shell, so
+             * spaces and metacharacters are interpreted.  Build
+             * `<shell> -c "<command>"`, expanding the `#{...}`
+             * interpolations inside the command string first.
+             */
+            char *expanded = expand_interp(step->argv[0], keg_prefix, keg_bin,
+                                           version, f->name);
+
+            if (expanded == NULL) {
+                goto fail;
+            }
+            cmds[i] = calloc(4, sizeof(*cmds[i]));
+            if (cmds[i] == NULL) {
+                free(expanded);
+                goto fail;
+            }
+            cmds[i][0] = strdup(masa_shell_path());
+            cmds[i][1] = strdup("-c");
+            cmds[i][2] = expanded;
+            if (cmds[i][0] == NULL || cmds[i][1] == NULL) {
+                /* Release this step now: the shared cleanup below stops at
+                 * the first NULL slot and would miss the later entries. */
+                free(cmds[i][0]);
+                free(cmds[i][1]);
+                free(cmds[i][2]);
+                free(cmds[i]);
+                cmds[i] = NULL;
+                goto fail;
+            }
+            continue;
+        }
 
         cmds[i] = calloc(step->argc + 1, sizeof(*cmds[i]));
         if (cmds[i] == NULL) {

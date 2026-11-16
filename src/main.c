@@ -41,6 +41,9 @@ static void print_usage(FILE *out, const char *prog)
             "  %s swift build [dir]        Build a Swift package (or swiftc wrapper)\n"
             "  %s swift info [dir]         Report a Package.swift's name and layout\n"
             "  %s doctor                   Check local macOS cross-build readiness\n"
+            "  %s pack --ipa <App.app> -o <out.ipa>\n"
+            "  %s pack --dmg <App.app> -o <out.dmg>\n"
+            "                              Package an .app as an .ipa or a .dmg\n"
             "  %s version                  Print the Masa version\n"
             "  %s help                     Show this message\n"
             "\n"
@@ -61,6 +64,7 @@ static void print_usage(FILE *out, const char *prog)
             MASA_VERSION,
             prog, prog, prog, prog, prog, prog, prog, prog,
             prog, prog, prog, prog, prog, prog, prog, prog,
+            prog, prog,
             MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
@@ -196,6 +200,9 @@ int masa_main(int argc, char *const argv[])
     }
     if (strcmp(command, "doctor") == 0) {
         return masa_doctor_main(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "pack") == 0) {
+        return masa_pack_main(argc - 2, &argv[2]);
     }
     if (strcmp(command, "version") == 0 || strcmp(command, "--version") == 0) {
         return cmd_version();

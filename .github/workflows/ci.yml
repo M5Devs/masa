@@ -116,7 +116,7 @@ jobs:
           mkdir -p build/win
           for f in src/main.c src/cc_wrapper.c src/swift_wrapper.c \
                    src/sys_shims.c src/tool_shims.c src/sdk.c \
-                   src/xcodeproj.c src/brew.c src/exec.c src/doctor.c \
+                   src/xcodeproj.c src/brew.c src/pack.c src/exec.c src/doctor.c \
                    src/platform_win.c; do
             x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
               -c "$f" -o "build/win/$(basename "$f" .c).o"

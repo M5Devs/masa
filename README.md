@@ -9,18 +9,17 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 9 (v0.9.0): local independence. `masa doctor` inspects the machine
-and reports whether it can cross-build macOS binaries, `make dist` packages
-the build reproducibly into `dist/` (native Linux always, plus Windows and
-Android when their toolchains are present) with `.tar.gz`/`.zip` archives and
-`dist/SHA256SUMS`, a `.woodpecker.yml` pipeline runs the build and tests on
-self-hosted CI, and `masa-term` gains a Windows ConPTY pseudo-terminal backend
-(`src/pty_win.c`). This sits on the Milestone 8 standalone GUI terminal
-(`masa-term`, an optional SDL2 + SDL2_ttf + libvterm front end over a real
-PTY), the Milestone 7 Swift toolchain support and Android cross-compilation,
-the Milestone 6 interactive `masa shell` and portable host-services layer, the
-Milestone 5 Homebrew formula linter and builder (`masa brew`), the Milestone 4
-Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3 full Mach-O
+Milestone 10 (v1.0.0): distribution. `masa pack` turns a `.app` bundle into a
+distributable `.ipa` (a ZIP of `Payload/<App>.app`) or `.dmg` (a UDIF disk
+image), and the Homebrew builder now runs single-string `system "..."` install
+steps through `/bin/sh -c` the way Homebrew does. This sits on the Milestone 9
+local independence (`masa doctor`, `make dist`, self-hosted CI, the Windows
+ConPTY backend), the Milestone 8 standalone GUI terminal (`masa-term`, an
+optional SDL2 + SDL2_ttf + libvterm front end over a real PTY), the Milestone 7
+Swift toolchain support and Android cross-compilation, the Milestone 6
+interactive `masa shell` and portable host-services layer, the Milestone 5
+Homebrew formula linter and builder (`masa brew`), the Milestone 4 Xcode
+`.xcodeproj` builder and `codesign` shim, the Milestone 3 full Mach-O
 executable linking, toolchain shims and `masa sdk`, and the Milestone 2
 `argv[0]` dispatch and `masa exec` environment runner, which in turn rest on
 the Milestone 1 `cc` wrapper and `sys` shims.
@@ -80,7 +79,7 @@ can be cross-compiled from Linux:
 # build the Windows binary (note: platform_posix.c is left out)
 x86_64-w64-mingw32-gcc -std=c11 -Wall -Wextra -Werror -Iinclude \
   src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c \
-  src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c \
+  src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/pack.c src/exec.c \
   src/platform_win.c -o masa.exe
 ```
 
@@ -102,6 +101,9 @@ masa xcode build <App.xcodeproj> [-o <dir>] [--bundle]
 masa brew lint <formula.rb>   Lint a Homebrew formula
 masa brew build <formula.rb> --source <dir> [--prefix <dir>]
                               Build a Homebrew formula into a Cellar
+masa pack --ipa <App.app> -o <out.ipa>
+masa pack --dmg <App.app> -o <out.dmg>
+                              Package a .app as an .ipa or a .dmg
 masa version                  Print the Masa version
 masa help                     Show the usage message
 ```
@@ -167,7 +169,7 @@ macOS binaries here, without a Mac or hosted CI. Each item is tagged
 
 ```sh
 masa doctor
-# masa 0.9.0 doctor - local macOS cross-build readiness
+# masa 1.0.0 doctor - local macOS cross-build readiness
 #
 # [OK]      C compiler     /usr/bin/clang
 # [OK]      linker         /usr/lib/llvm-19/bin/ld64.lld
@@ -202,11 +204,11 @@ and Android `aarch64` (`ANDROID_CC`) builds. Each target lands in
 
 ```sh
 make dist
-# dist: Masa 0.9.0 (x86_64 host)
-# dist: building native masa-0.9.0-linux-x86_64
-# dist: packaged masa-0.9.0-linux-x86_64.tar.gz and masa-0.9.0-linux-x86_64.zip
-# dist: building masa-0.9.0-windows-x86_64
-# dist: packaged masa-0.9.0-windows-x86_64.tar.gz and masa-0.9.0-windows-x86_64.zip
+# dist: Masa 1.0.0 (x86_64 host)
+# dist: building native masa-1.0.0-linux-x86_64
+# dist: packaged masa-1.0.0-linux-x86_64.tar.gz and masa-1.0.0-linux-x86_64.zip
+# dist: building masa-1.0.0-windows-x86_64
+# dist: packaged masa-1.0.0-windows-x86_64.tar.gz and masa-1.0.0-windows-x86_64.zip
 # dist: skipping Android (set ANDROID_CC to an NDK clang to include it)
 # dist: wrote .../dist/SHA256SUMS
 ```
@@ -406,11 +408,53 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 
 The steps run inside `--source` with the Masa shim environment on `PATH`
 (`cc`, `clang`, `uname`, `sw_vers`, `xcrun`, `codesign`, `ar`, `ld`, ...) and
-`MASA_SDK_PATH`, so a `system "make"` that calls `$(CC)` produces Mach-O. Every
+`MASA_SDK_PATH`, so a `system "make"` that calls `$(CC)` produces Mach-O. A
+single-string `system "cc main.c -o mytool"` (spaces or shell syntax) is run
+through `/bin/sh -c` the way Homebrew does, while the multi-argument form
+`system "cc", "main.c", ...` is executed directly with `execvp`. Every
 regular file the steps place in `Cellar/<name>/<version>/bin/` is checked for
 the 64-bit Mach-O magic (`CF FA ED FE`) and the `MH_EXECUTE` file type, then
 linked into `<prefix>/bin/`. The prefix defaults to `$MASA_BREW_PREFIX`, or
 `/tmp/masa-homebrew` when that is unset.
+
+### `masa pack`
+
+`masa pack` packages a `.app` bundle (for example the one produced by
+`masa xcode build --bundle`) into a distributable artifact, without any Apple
+tools:
+
+```sh
+MASA_SDK_PATH=/opt/masa/sdk masa xcode build DemoApp.xcodeproj --bundle
+masa pack --ipa DemoApp.app -o DemoApp.ipa
+masa pack --dmg DemoApp.app -o DemoApp.dmg
+```
+
+- `--ipa` writes a ZIP archive whose entries live under
+  `Payload/<App>.app/`, which is the layout the iOS/macOS App Store expects.
+  The writer is a from-scratch C11 implementation: it uses the `STORE` method
+  and computes CRC-32 for each entry, so the result opens with any ZIP reader.
+- `--dmg` writes a UDIF disk image: an XML property list describing the
+  device and a `blkx` block table, followed by a 512-byte `koly` trailer
+  (version 4, header size 512) with matching master and data CRC-32s.
+
+| Option       | Meaning                                             |
+| ------------ | --------------------------------------------------- |
+| `--ipa`      | Package as a `.ipa` (ZIP of `Payload/<App>.app`)    |
+| `--dmg`      | Package as a `.dmg` (UDIF image)                    |
+| `-o <file>`  | Output path (required)                              |
+
+Exactly one of `--ipa` or `--dmg` is required, and the input must be a
+directory. Missing or invalid arguments are reported clearly and exit with
+status 2:
+
+```
+masa: pack: missing format (--ipa | --dmg)
+masa: pack: choose one of --ipa or --dmg
+masa: pack: missing input <App.app>
+masa: pack: missing -o <output>
+masa: pack: unknown option '--bogus'
+masa: pack: 'Demo.app' is not a directory
+```
 
 ### `masa sys`
 
@@ -497,6 +541,7 @@ src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims and codesign
 src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
 src/brew.c             Homebrew formula linter and builder
+src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
 src/exec.c             init-shims, exec, shell and the shim environment
 src/doctor.c           masa doctor: local cross-build readiness report
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
@@ -516,7 +561,8 @@ tests/test_gui.c       masa-term tests (make test-gui)
 
 `make test` covers the argument builder, every shim, the CLI router,
 `argv[0]` dispatch, `init-shims`, `exec`, `shell`, `sdk`, `xcode`, `brew`,
-`swift`, the toolchain shims, `codesign`, and compiler-recursion safety.
+`swift`, `pack`, the toolchain shims, `codesign`, and compiler-recursion
+safety.
 
 End-to-end tests produce real Mach-O files and check the header bytes: the
 magic number (`CF FA ED FE`) and, for linked output, the file type
@@ -548,10 +594,19 @@ lines and a zero exit) and against a missing SDK (checking the `[WARN]` line
 and the `init-stub` hint), and confirm `doctor` reports a `[MISSING]` compiler
 and exits non-zero when no compiler is on `PATH`; a further test cross-compiles
 the ConPTY backend (`src/pty_win.c`) and its shared helper with
-`x86_64-w64-mingw32-gcc`, skipping when MinGW-w64 is absent. A separate test
-compiles every source for Android with the NDK clang (`ANDROID_CC`) when one is
-available, and skips otherwise. Tests that need `clang` or `make` skip
-themselves when the tool is absent.
+`x86_64-w64-mingw32-gcc`, skipping when MinGW-w64 is absent. The Milestone 10
+tests build a formula whose install steps are single-string `system "..."`
+calls (checking the resulting Cellar binary is `MH_EXECUTE` and the
+`<prefix>/bin` symlink is present) and assert that the parser routes a bare
+word to `execvp` but a command with spaces or shell syntax through `/bin/sh`;
+`masa pack --ipa` is run over a generated bundle and the output checked to be
+a ZIP (`PK\x03\x04`) whose entries include `Payload/DemoApp.app/` and the
+`Contents/MacOS/` executable, `masa pack --dmg` is checked to end in a `koly`
+UDIF trailer (version 4, header size 512) wrapping an XML plist with a `blkx`
+block table, and the pack error paths are checked to exit with status 2. A
+separate test compiles every source for Android with the NDK clang
+(`ANDROID_CC`) when one is available, and skips otherwise. Tests that need
+`clang` or `make` skip themselves when the tool is absent.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c

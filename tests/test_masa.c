@@ -16,6 +16,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,10 +94,49 @@ static void set_env(const char *name, const char *value)
 }
 
 /*
+ * Read fd to EOF, storing at most cap - 1 bytes in buf (NUL-terminated)
+ * and discarding any remainder.  Reading all the way to EOF is what
+ * keeps the writer alive: if the reader stopped early and closed the
+ * pipe, a child still writing its output would be killed by SIGPIPE
+ * (which made the captured-exit-status tests flaky).
+ */
+static size_t drain_fd(int fd, char *buf, size_t cap)
+{
+    size_t used = 0;
+    char scratch[4096];
+
+    for (;;) {
+        ssize_t n;
+        int full = (buf == NULL || cap == 0 || used >= cap - 1);
+
+        if (full) {
+            n = read(fd, scratch, sizeof(scratch));
+        } else {
+            n = read(fd, buf + used, cap - 1 - used);
+        }
+        if (n > 0) {
+            if (!full) {
+                used += (size_t)n;
+            }
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    if (buf != NULL && cap > 0) {
+        buf[used] = '\0';
+    }
+    return used;
+}
+
+/*
  * Run masa_main in a forked child with stdout/stderr redirected into
  * pipes, and return the child's exit status.  Output buffers are always
- * NUL terminated.  The captured streams are small, so draining stdout
- * before stderr cannot deadlock in practice.
+ * NUL terminated.  Both streams are drained to EOF before the child is
+ * reaped so a verbose child never dies from SIGPIPE; the captured
+ * streams are small, so reading stdout before stderr cannot deadlock.
  */
 static int run_masa(char *const argv[], char *out, size_t outcap,
                     char *err, size_t errcap)
@@ -105,7 +145,6 @@ static int run_masa(char *const argv[], char *out, size_t outcap,
     int err_pipe[2];
     int status = -1;
     pid_t pid;
-    ssize_t n;
     size_t used;
 
     if (out != NULL && outcap > 0) {
@@ -146,6 +185,9 @@ static int run_masa(char *const argv[], char *out, size_t outcap,
         close(out_pipe[1]);
         close(err_pipe[1]);
 
+        /* Never let a closed capture pipe kill us with SIGPIPE. */
+        signal(SIGPIPE, SIG_IGN);
+
         status = masa_main(argc, argv);
 
         /* _exit() would skip stdio flushing and lose buffered output. */
@@ -156,28 +198,12 @@ static int run_masa(char *const argv[], char *out, size_t outcap,
     close(out_pipe[1]);
     close(err_pipe[1]);
 
-    if (out != NULL && outcap > 0) {
-        used = 0;
-        while ((n = read(out_pipe[0], out + used, outcap - 1 - used)) > 0) {
-            used += (size_t)n;
-            if (used >= outcap - 1) {
-                break;
-            }
-        }
-        out[used] = '\0';
-    }
+    used = drain_fd(out_pipe[0], out, (out != NULL) ? outcap : 0);
+    (void)used;
     close(out_pipe[0]);
 
-    if (err != NULL && errcap > 0) {
-        used = 0;
-        while ((n = read(err_pipe[0], err + used, errcap - 1 - used)) > 0) {
-            used += (size_t)n;
-            if (used >= errcap - 1) {
-                break;
-            }
-        }
-        err[used] = '\0';
-    }
+    used = drain_fd(err_pipe[0], err, (err != NULL) ? errcap : 0);
+    (void)used;
     close(err_pipe[0]);
 
     while (waitpid(pid, &status, 0) < 0) {
@@ -239,6 +265,8 @@ static int run_masa_with_stdin(char *const argv[], const char *script,
         dup2(out_pipe[1], STDOUT_FILENO);
         close(in_pipe[0]);
         close(out_pipe[1]);
+        /* Never let a closed capture pipe kill us with SIGPIPE. */
+        signal(SIGPIPE, SIG_IGN);
         status = masa_main(argc, argv);
         fflush(NULL);
         _exit(status);
@@ -259,16 +287,8 @@ static int run_masa_with_stdin(char *const argv[], const char *script,
     }
     close(in_pipe[1]);
 
-    if (out != NULL && outcap > 0) {
-        used = 0;
-        while ((n = read(out_pipe[0], out + used, outcap - 1 - used)) > 0) {
-            used += (size_t)n;
-            if (used >= outcap - 1) {
-                break;
-            }
-        }
-        out[used] = '\0';
-    }
+    used = drain_fd(out_pipe[0], out, (out != NULL) ? outcap : 0);
+    (void)used;
     close(out_pipe[0]);
 
     while (waitpid(pid, &status, 0) < 0) {
@@ -3064,6 +3084,519 @@ static void test_brew_build_errors(void)
     reset_masa_env();
 }
 
+/*
+ * A formula whose install steps are single-string `system "..."` calls:
+ * `system "cc main.c -o mytool"`, `system "mkdir -p #{bin}"` and
+ * `system "cp mytool #{bin}/mytool"`.  Ruby runs each of these through
+ * `/bin/sh -c`, so spaces and metacharacters must be interpreted - the
+ * whole point of the shell path in brew.c.
+ */
+static void test_brew_build_shell_string_steps(void)
+{
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    static const char *formula_text =
+        "class Shelltool < Formula\n"
+        "  desc \"Built from single-string system calls\"\n"
+        "  homepage \"https://example.com/shelltool\"\n"
+        "  url \"https://example.com/shelltool-3.0.0.tar.gz\"\n"
+        "  sha256 \"cafef00d\"\n"
+        "  def install\n"
+        "    system \"cc main.c -o mytool\"\n"
+        "    system \"mkdir -p #{bin}\"\n"
+        "    system \"cp mytool #{bin}/mytool\"\n"
+        "  end\n"
+        "end\n";
+    char dir[] = "/tmp/masa_brew_shell_XXXXXX";
+    char sdk[512];
+    char prefix[512];
+    char formula[512];
+    char srcdir[512];
+    char mainc[1024];
+    char binpath[4096];
+    char linkpath[4096];
+    char out[8192];
+    char err[8192];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    char *argv[10];
+    char *masa_bin;
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    masa_bin = masa_bin_path();
+    if (masa_bin == NULL || access(masa_bin, X_OK) != 0) {
+        printf("  SKIP the masa binary is not built\n");
+        g_skipped++;
+        free(masa_bin);
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        free(masa_bin);
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(prefix, sizeof(prefix), "%s/prefix", dir);
+    snprintf(formula, sizeof(formula), "%s/shelltool.rb", dir);
+    snprintf(srcdir, sizeof(srcdir), "%s/src", dir);
+    snprintf(mainc, sizeof(mainc), "%s/main.c", srcdir);
+    snprintf(binpath, sizeof(binpath),
+             "%s/Cellar/shelltool/3.0.0/bin/mytool", prefix);
+    snprintf(linkpath, sizeof(linkpath), "%s/bin/mytool", prefix);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+    set_env(MASA_SHIM_TARGET_ENV, masa_bin);
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        mkdir(srcdir, 0755) != 0 ||
+        write_file(mainc, "int main(void) { return 0; }\n") != 0 ||
+        write_file(formula, formula_text) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the brew project\n");
+        g_failed++;
+        remove_tree(dir);
+        free(masa_bin);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "build";
+    argv[3] = formula;
+    argv[4] = "--source";
+    argv[5] = srcdir;
+    argv[6] = "--prefix";
+    argv[7] = prefix;
+    argv[8] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  brew build stdout: %s\n  stderr: %s\n", out, err);
+    }
+    CHECK(rc == 0);
+
+    CHECK(file_exists(binpath));
+    if (file_exists(binpath)) {
+        if (read_macho_header(binpath, magic, filetype) != 0) {
+            g_failed++;
+        } else {
+            CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+            CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+        }
+    }
+    CHECK(is_symlink_to(linkpath, binpath));
+
+    remove_tree(dir);
+    free(masa_bin);
+    reset_masa_env();
+}
+
+/*
+ * The single-string parser must route shell commands through the shell
+ * and leave a bare one-word command on the direct-exec path.
+ */
+static void test_brew_formula_shell_string_flag(void)
+{
+    static const char *text =
+        "class Flags < Formula\n"
+        "  desc \"x\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  url \"https://e.com/flags-1.0.tar.gz\"\n"
+        "  sha256 \"abc\"\n"
+        "  def install\n"
+        "    system \"make\"\n"
+        "    system \"cc main.c -o mytool\"\n"
+        "    system \"mkdir -p #{bin}\"\n"
+        "    system \"cc\", \"main.c\", \"-o\", \"mytool\"\n"
+        "  end\n"
+        "end\n";
+    struct masa_brew_formula f;
+    char err[256];
+    int rc;
+
+    memset(&f, 0, sizeof(f));
+    rc = masa_brew_formula_parse(text, strlen(text), &f, err, sizeof(err));
+    CHECK(rc == 0);
+    if (rc != 0) {
+        fprintf(stderr, "  parse error: %s\n", err);
+        return;
+    }
+    CHECK(f.step_count == 4);
+    if (f.step_count == 4) {
+        /* `system "make"` is a bare word: direct exec. */
+        CHECK(f.steps[0].use_shell == 0);
+        /* `system "cc main.c -o mytool"` needs the shell. */
+        CHECK(f.steps[1].use_shell == 1);
+        /* `system "mkdir -p #{bin}"` needs the shell. */
+        CHECK(f.steps[2].use_shell == 1);
+        /* Multi-argument form never uses the shell. */
+        CHECK(f.steps[3].use_shell == 0);
+        CHECK(f.steps[3].argc == 4);
+    }
+    masa_brew_formula_free(&f);
+}
+
+/* ------------------------------------------------------------------ */
+/* Milestone 10: `masa pack` (.ipa and .dmg)                          */
+/* ------------------------------------------------------------------ */
+
+/* Read the whole file into a malloc'd buffer (NUL-terminated, len out). */
+static unsigned char *read_whole(const char *path, size_t *out_len)
+{
+    FILE *fp = fopen(path, "rb");
+    unsigned char *buf;
+    long size;
+
+    if (fp == NULL) {
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    size = ftell(fp);
+    if (size < 0 || fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    buf = malloc((size_t)size + 1);
+    if (buf == NULL) {
+        fclose(fp);
+        return NULL;
+    }
+    if (size > 0 && fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+        free(buf);
+        fclose(fp);
+        return NULL;
+    }
+    fclose(fp);
+    buf[size] = '\0';
+    *out_len = (size_t)size;
+    return buf;
+}
+
+/*
+ * Bounded substring search over a binary blob.  strstr() would stop at
+ * the first NUL byte, which both the ZIP headers and the UDIF trailer
+ * are full of, so the length is carried explicitly.
+ */
+static int contains_bytes(const unsigned char *hay, size_t haylen,
+                          const char *needle)
+{
+    size_t nlen = strlen(needle);
+    size_t i;
+
+    if (nlen == 0 || haylen < nlen) {
+        return 0;
+    }
+    for (i = 0; i + nlen <= haylen; i++) {
+        if (memcmp(hay + i, needle, nlen) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * `masa pack --ipa` over a bundle produced by `masa xcode build --bundle`:
+ * the result must be a ZIP (PK\x03\x04) whose entries place the app under
+ * `Payload/<App>.app/` and include the `Contents/MacOS/` executable.
+ */
+static void test_pack_ipa(void)
+{
+    char dir[] = "/tmp/masa_pack_ipa_XXXXXX";
+    char sdk[512];
+    char out_dir[512];
+    char proj[512];
+    char ipa[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char *blob;
+    size_t blob_len;
+    char *argv[10];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+    snprintf(proj, sizeof(proj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(ipa, sizeof(ipa), "%s/DemoApp.ipa", dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        make_demo_project(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the project\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    /* Build the .app bundle first. */
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "--bundle";
+    argv[5] = "-o";
+    argv[6] = out_dir;
+    argv[7] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  xcode build stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+
+    /* Pack the .app bundle into an .ipa. */
+    {
+        char app[4096];
+
+        snprintf(app, sizeof(app), "%s/DemoApp.app", out_dir);
+        argv[0] = "masa";
+        argv[1] = "pack";
+        argv[2] = "--ipa";
+        argv[3] = app;
+        argv[4] = "-o";
+        argv[5] = ipa;
+        argv[6] = NULL;
+        rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+        if (rc != 0) {
+            fprintf(stderr, "  pack stdout: %s\n  stderr: %s\n", out, err);
+        }
+        CHECK(rc == 0);
+    }
+
+    CHECK(file_exists(ipa));
+    blob = read_whole(ipa, &blob_len);
+    CHECK(blob != NULL);
+    if (blob != NULL) {
+        CHECK(blob_len >= 4);
+        CHECK(blob[0] == 'P' && blob[1] == 'K' && blob[2] == 3 &&
+              blob[3] == 4);
+        CHECK(contains_bytes(blob, blob_len, "Payload/"));
+        CHECK(contains_bytes(blob, blob_len, "Payload/DemoApp.app/"));
+        CHECK(contains_bytes(blob, blob_len, "Contents/MacOS/DemoApp"));
+        free(blob);
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * `masa pack --dmg`: the image must end in a 512-byte `koly` trailer
+ * (version 4, headerSize 512) that points at a valid XML plist.
+ */
+static void test_pack_dmg(void)
+{
+    char dir[] = "/tmp/masa_pack_dmg_XXXXXX";
+    char sdk[512];
+    char out_dir[512];
+    char proj[512];
+    char dmg[4096];
+    char out[4096];
+    char err[8192];
+    unsigned char *blob;
+    size_t blob_len;
+    char *argv[10];
+    int rc;
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+    snprintf(proj, sizeof(proj), "%s/DemoApp.xcodeproj", dir);
+    snprintf(dmg, sizeof(dmg), "%s/DemoApp.dmg", dir);
+
+    reset_masa_env();
+    set_env(MASA_TARGET_ENV, "arm64-apple-darwin");
+
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        make_demo_project(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot prepare the project\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+
+    argv[0] = "masa";
+    argv[1] = "xcode";
+    argv[2] = "build";
+    argv[3] = proj;
+    argv[4] = "--bundle";
+    argv[5] = "-o";
+    argv[6] = out_dir;
+    argv[7] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+
+    {
+        char app[4096];
+        snprintf(app, sizeof(app), "%s/DemoApp.app", out_dir);
+        argv[0] = "masa";
+        argv[1] = "pack";
+        argv[2] = "--dmg";
+        argv[3] = app;
+        argv[4] = "-o";
+        argv[5] = dmg;
+        argv[6] = NULL;
+        rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+        if (rc != 0) {
+            fprintf(stderr, "  pack stdout: %s\n  stderr: %s\n", out, err);
+        }
+        CHECK(rc == 0);
+    }
+
+    CHECK(file_exists(dmg));
+    blob = read_whole(dmg, &blob_len);
+    CHECK(blob != NULL);
+    if (blob != NULL) {
+        CHECK(blob_len >= 512);
+        if (blob_len >= 512) {
+            const unsigned char *koly = blob + blob_len - 512;
+            unsigned int version;
+            unsigned int header_size;
+
+            /* Magic "koly" = 0x6B6F6C79. */
+            CHECK(koly[0] == 0x6B && koly[1] == 0x6F && koly[2] == 0x6C &&
+                  koly[3] == 0x79);
+            /* Version (LE u32 @4) must be 4; headerSize (@8) must be 512. */
+            version = (unsigned int)koly[4] | ((unsigned int)koly[5] << 8) |
+                      ((unsigned int)koly[6] << 16) |
+                      ((unsigned int)koly[7] << 24);
+            header_size = (unsigned int)koly[8] | ((unsigned int)koly[9] << 8) |
+                          ((unsigned int)koly[10] << 16) |
+                          ((unsigned int)koly[11] << 24);
+            CHECK(version == 4);
+            CHECK(header_size == 512);
+
+            /* The XML plist must sit inside the image, before the trailer. */
+            CHECK(contains_bytes(blob, blob_len, "<?xml"));
+            CHECK(contains_bytes(blob, blob_len, "<plist"));
+            CHECK(contains_bytes(blob, blob_len, "blkx"));
+        }
+        free(blob);
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* Error paths: missing flags, a missing input and an unknown option. */
+static void test_pack_errors(void)
+{
+    char out[4096];
+    char err[8192];
+    char *argv[10];
+    int rc;
+
+    reset_masa_env();
+
+    /* No format flag. */
+    argv[0] = "masa";
+    argv[1] = "pack";
+    argv[2] = "App.app";
+    argv[3] = "-o";
+    argv[4] = "/tmp/out";
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing format");
+
+    /* Both formats at once. */
+    argv[2] = "--ipa";
+    argv[3] = "--dmg";
+    argv[4] = "App.app";
+    argv[5] = "-o";
+    argv[6] = "/tmp/out";
+    argv[7] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "choose one");
+
+    /* Missing input. */
+    argv[2] = "--ipa";
+    argv[3] = "-o";
+    argv[4] = "/tmp/out";
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing input");
+
+    /* Missing -o. */
+    argv[2] = "--dmg";
+    argv[3] = "App.app";
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "missing -o");
+
+    /* -o with no argument. */
+    argv[2] = "--ipa";
+    argv[3] = "App.app";
+    argv[4] = "-o";
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "needs an output path");
+
+    /* Unknown option. */
+    argv[2] = "--bogus";
+    argv[3] = "App.app";
+    argv[4] = "-o";
+    argv[5] = "/tmp/out";
+    argv[6] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "unknown option");
+
+    /* A missing input directory. */
+    argv[2] = "--ipa";
+    argv[3] = "/tmp/masa_no_such_app.app";
+    argv[4] = "-o";
+    argv[5] = "/tmp/out";
+    argv[6] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 1);
+    CHECK_CONTAINS(err, "is not a directory");
+
+    reset_masa_env();
+}
+
 /* ------------------------------------------------------------------ */
 /* Milestone 6: `masa shell` and the host-services layer               */
 /* ------------------------------------------------------------------ */
@@ -3690,7 +4223,8 @@ static void test_android_ndk_compile(void)
     static const char *sources[] = {
         "src/main.c", "src/cc_wrapper.c", "src/swift_wrapper.c",
         "src/sys_shims.c", "src/tool_shims.c", "src/sdk.c",
-        "src/xcodeproj.c", "src/brew.c", "src/exec.c", "src/doctor.c",
+        "src/xcodeproj.c", "src/brew.c", "src/pack.c", "src/exec.c",
+        "src/doctor.c",
         "src/platform_posix.c"
     };
     const char *ndk_cc = getenv("ANDROID_CC");
@@ -3997,6 +4531,11 @@ int main(void)
     RUN(test_brew_build_makefile);
     RUN(test_brew_build_cc_steps);
     RUN(test_brew_build_errors);
+    RUN(test_brew_build_shell_string_steps);
+    RUN(test_brew_formula_shell_string_flag);
+    RUN(test_pack_ipa);
+    RUN(test_pack_dmg);
+    RUN(test_pack_errors);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

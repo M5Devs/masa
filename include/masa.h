@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "0.9.0"
+#define MASA_VERSION "1.0.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -409,6 +409,14 @@ struct masa_brew_step {
     char *prog;    /* program to run, e.g. "make" */
     char **argv;   /* full argument vector, NULL-terminated */
     size_t argc;
+    /*
+     * A single-string `system "..."` runs through a shell, exactly as
+     * Ruby's Kernel#system does, so spaces and shell metacharacters are
+     * interpreted; a multi-argument `system "prog", "arg", ...` runs the
+     * program directly through execvp.  Set when the step must go through
+     * `sh -c`.
+     */
+    int use_shell;
 };
 
 /*
@@ -472,6 +480,19 @@ int masa_brew_main(int argc, char *const argv[]);
  * requirements are present and non-zero otherwise.
  */
 int masa_doctor_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Packer (src/pack.c)                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * `masa pack --ipa <App.app> -o <out.ipa>` and
+ * `masa pack --dmg <App.app> -o <out.dmg>` - package a built `.app`
+ * bundle into an iOS `.ipa` (a ZIP with the app under `Payload/`) or a
+ * macOS UDIF `.dmg` disk image, using only the C library.  Returns 0 on
+ * success and non-zero on error.
+ */
+int masa_pack_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* CLI router (src/main.c)                                            */

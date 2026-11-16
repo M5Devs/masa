@@ -32,7 +32,7 @@ DIST="$ROOT/dist"
 CFLAGS="-std=c11 -Wall -Wextra -Werror -Iinclude"
 
 # Core translation units, without the platform backend (added per target).
-CORE_SRC="src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/exec.c src/doctor.c"
+CORE_SRC="src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/pack.c src/exec.c src/doctor.c"
 
 ARCHIVES=""
 
