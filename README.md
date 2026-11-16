@@ -9,19 +9,20 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## Status
 
-Milestone 7 (v0.7.0): Swift toolchain support and Android cross-compilation.
-A new `swiftc` wrapper (`masa swiftc`, and the `swift`/`swiftc` `argv[0]`
-shims) injects the target triple and, when configured, the SDK root, and
-`masa swift build|info` reads a `Package.swift` manifest. The Xcode builder
-now recognises `.swift` sources and hands a Swift target to `swiftc`. Every
-C11 source also compiles cleanly for Android with the NDK clang
-(`make android`, `ANDROID_CC`), and CI builds it. This sits on the
-Milestone 6 interactive `masa shell` and portable host-services layer, the
-Milestone 5 Homebrew formula linter and builder (`masa brew`), the
-Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3
-full Mach-O executable linking, toolchain shims and `masa sdk`, and the
-Milestone 2 `argv[0]` dispatch and `masa exec` environment runner, which in
-turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
+Milestone 8 (v0.8.0): the standalone GUI terminal emulator, `masa-term`.
+An optional SDL2 + SDL2_ttf + libvterm front end runs `masa shell` on a real
+pseudo-terminal and renders it in a dark, macOS-style window with the classic
+red/yellow/green traffic lights, full 256/RGB colour and a blinking cursor
+(`make gui`, `src/gui_term.c`, `src/pty_posix.c`). The core command line tool
+stays free of any third-party dependency, so the Android NDK and Windows
+MinGW builds are unchanged. This sits on the Milestone 7 Swift toolchain
+support and Android cross-compilation, the Milestone 6 interactive `masa
+shell` and portable host-services layer, the Milestone 5 Homebrew formula
+linter and builder (`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder
+and `codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain
+shims and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
+environment runner, which in turn rest on the Milestone 1 `cc` wrapper and
+`sys` shims.
 
 ## Requirements
 
@@ -35,17 +36,27 @@ turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
   projects whose target compiles `.swift` files.
 - Optional: the Android NDK (`aarch64-linux-android24-clang`) to cross-compile
   Masa itself for Android (`make android`).
+- Optional, for `make gui` only: `libsdl2-dev`, `libsdl2-ttf-dev`,
+  `libvterm-dev` (plus a monospace font such as `fonts-dejavu-core`). None of
+  these are needed for `make` or `make test`.
 
 ## Building
 
 ```sh
 make          # builds build/masa
 make test     # builds and runs the unit test suite
+make gui      # builds build/masa-term (SDL2 + SDL2_ttf + libvterm)
+make test-gui # builds and runs the headless GUI test suite
 make clean
 ```
 
 Sources are compiled with `-std=c11 -Wall -Wextra -Werror -fsanitize=address`,
 so the build fails on any warning and the tests run under AddressSanitizer.
+
+`make gui` and `make test-gui` are the only targets that need the SDL2,
+SDL2_ttf and libvterm development packages; the Makefile asks `pkg-config`
+for their flags. Override `GUI_CFLAGS` / `GUI_LIBS` if the headers are not on
+the default `pkg-config` path.
 
 To cross-compile Masa for Android with the NDK (no AddressSanitizer, which the
 NDK does not ship):
@@ -358,6 +369,33 @@ Shims the platform queries that build systems use to detect macOS:
 
 `sw_vers` also accepts `-productName`, `-productVersion` and `-buildVersion`.
 
+### `masa-term` (GUI terminal)
+
+`masa-term` is a standalone graphical terminal for the Masa shell, built only
+by `make gui` (it links SDL2, SDL2_ttf and libvterm). It opens a real
+pseudo-terminal, runs `masa shell` on it, feeds the output through `libvterm`
+and draws a dark, macOS-style window: a header bar with the red/yellow/green
+traffic lights and the `masa — Darwin` title, the full 256-colour and
+24-bit-RGB ANSI palette, and a blinking block cursor.
+
+```sh
+make gui
+./build/masa-term              # open a window running `masa shell`
+./build/masa-term --headless   # render a few frames with the dummy driver
+```
+
+The window is resizable; the terminal recomputes its rows and columns and
+tells the child through `TIOCSWINSZ`. The monospace font is discovered from a
+list of common system fonts (DejaVu Sans Mono, Liberation Mono, JetBrains
+Mono, Menlo, ...), or set explicitly:
+
+```sh
+MASA_FONT=/path/to/Font.ttf ./build/masa-term
+```
+
+Set `MASA_BIN` if the `masa` executable is not next to `masa-term` or on
+`PATH`.
+
 ## Environment variables
 
 | Variable        | Meaning                                                |
@@ -373,6 +411,8 @@ Shims the platform queries that build systems use to detect macOS:
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
 | `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
+| `MASA_FONT`     | TrueType font `masa-term` uses (overrides discovery)   |
+| `MASA_BIN`      | `masa` executable `masa-term` runs on the PTY          |
 | `TMPDIR`        | Preferred root for temporary directories and Cellars   |
 
 ## Layout
@@ -391,7 +431,11 @@ src/brew.c             Homebrew formula linter and builder
 src/exec.c             init-shims, exec, shell and the shim environment
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
 src/platform_win.c     host services on Windows (CreateProcess)
+include/masa_gui.h     interface for masa-term (GUI build only)
+src/pty_posix.c        pseudo-terminal backend for masa-term
+src/gui_term.c         masa-term: SDL2 + libvterm window (make gui)
 tests/test_masa.c      unit tests
+tests/test_gui.c       masa-term tests (make test-gui)
 ```
 
 ## Testing
@@ -428,7 +472,16 @@ leaks), drive `masa swift build`, and confirm the Xcode builder routes a
 with the NDK clang (`ANDROID_CC`) when one is available, and skips otherwise.
 Tests that need `clang` or `make` skip themselves when the tool is absent.
 
+`make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
+same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
+"uname -s && sw_vers -productName"` on a real pseudo-terminal, feeds the bytes
+through libvterm and asserts the screen buffer contains `Darwin` and `macOS`;
+it exercises the PTY resize and write paths; and it brings up the SDL2 +
+SDL2_ttf renderer under `SDL_VIDEODRIVER=dummy`, draws a frame, resizes and
+tears down with no ASan/LSan leaks.
+
 A GitHub Actions workflow (`.github/workflows/ci.yml`) builds and tests with
-both `gcc` and `clang` on Linux, cross-compiles the Windows backend with
-MinGW-w64, and cross-compiles for Android with the NDK (`-Wall -Wextra
--Werror`).
+both `gcc` and `clang` on Linux, builds `masa-term` and runs its headless
+tests (`libsdl2-dev`, `libsdl2-ttf-dev`, `libvterm-dev`, `fonts-dejavu-core`),
+cross-compiles the Windows backend with MinGW-w64, and cross-compiles for
+Android with the NDK (`-Wall -Wextra -Werror`).

@@ -1,0 +1,358 @@
+/*
+ * test_gui.c - tests for masa-term, the SDL2/libvterm terminal emulator.
+ *
+ * Two things are exercised here without a display:
+ *   1. The PTY backend runs `masa shell -c "uname -s && sw_vers -productName"`
+ *      and the bytes it produces are fed through libvterm, whose screen
+ *      buffer must contain "Darwin" and "macOS".
+ *   2. The SDL2 + SDL2_ttf renderer comes up under SDL_VIDEODRIVER=dummy,
+ *      draws a frame, resizes and tears down with no ASan/LSan leaks.
+ *
+ * Build and run with `make test-gui`.
+ *
+ * Copyright (C) 2026 Masa contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <SDL.h>
+#include <vterm.h>
+
+#include "masa.h"
+#include "masa_compat.h"
+#include "masa_gui.h"
+
+static int g_run;
+static int g_failed;
+static int g_skipped;
+
+#define CHECK(cond)                                                        \
+    do {                                                                   \
+        g_run++;                                                           \
+        if (!(cond)) {                                                     \
+            g_failed++;                                                    \
+            printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);       \
+        }                                                                  \
+    } while (0)
+
+#define CHECK_CONTAINS(hay, needle)                                        \
+    do {                                                                   \
+        g_run++;                                                           \
+        if ((hay) == NULL || strstr((hay), (needle)) == NULL) {            \
+            g_failed++;                                                    \
+            printf("  FAIL %s:%d: expected to find \"%s\" in:\n%s\n",      \
+                   __FILE__, __LINE__, (needle),                           \
+                   (hay) != NULL ? (hay) : "(null)");                      \
+        }                                                                  \
+    } while (0)
+
+/* Locate the `masa` executable: $MASA_BIN, then next to this test binary,
+ * then on PATH.  Returns a malloc'd string or NULL. */
+static char *find_masa(void)
+{
+    const char *env = getenv("MASA_BIN");
+    char *self;
+    char *slash;
+    char *cand;
+
+    if (env != NULL && env[0] != '\0') {
+        return strdup(env);
+    }
+
+    self = masa_self_path();
+    if (self != NULL) {
+        slash = strrchr(self, '/');
+        if (slash != NULL) {
+            size_t need;
+
+            *slash = '\0';
+            need = strlen(self) + strlen("/masa") + 1;
+            cand = malloc(need);
+            if (cand != NULL) {
+                snprintf(cand, need, "%s/masa", self);
+                if (access(cand, X_OK) == 0) {
+                    free(self);
+                    return cand;
+                }
+                free(cand);
+            }
+        }
+        free(self);
+    }
+
+    return masa_which("masa");
+}
+
+/* Render the whole libvterm screen into out as plain text. */
+static void screen_dump(VTerm *vt, char *out, size_t cap)
+{
+    VTermScreen *screen = vterm_obtain_screen(vt);
+    int rows = 0;
+    int cols = 0;
+    int r;
+    size_t used = 0;
+
+    vterm_get_size(vt, &rows, &cols);
+    if (cap == 0) {
+        return;
+    }
+
+    for (r = 0; r < rows; r++) {
+        int last = -1;
+        int c;
+
+        for (c = 0; c < cols; c++) {
+            VTermPos pos;
+            VTermScreenCell cell;
+
+            pos.row = r;
+            pos.col = c;
+            memset(&cell, 0, sizeof(cell));
+            if (vterm_screen_get_cell(screen, pos, &cell) &&
+                cell.chars[0] != 0 && cell.chars[0] != ' ') {
+                last = c;
+            }
+        }
+        for (c = 0; c <= last; c++) {
+            VTermPos pos;
+            VTermScreenCell cell;
+            uint32_t cp;
+
+            pos.row = r;
+            pos.col = c;
+            memset(&cell, 0, sizeof(cell));
+            vterm_screen_get_cell(screen, pos, &cell);
+            cp = (cell.chars[0] != 0) ? cell.chars[0] : ' ';
+            if (used + 1 < cap) {
+                out[used++] = (cp < 128) ? (char)cp : '?';
+            }
+        }
+        if (used + 1 < cap) {
+            out[used++] = '\n';
+        }
+    }
+    out[(used < cap) ? used : cap - 1] = '\0';
+}
+
+static void test_pty_shell_through_vterm(void)
+{
+    char *masa = find_masa();
+    struct masa_pty pty;
+    VTerm *vt;
+    char *argv[5];
+    char text[8192];
+    int rc;
+
+    printf("[ RUN  ] test_pty_shell_through_vterm\n");
+
+    if (masa == NULL) {
+        printf("  SKIP masa executable not found\n");
+        g_skipped++;
+        return;
+    }
+
+    argv[0] = masa;
+    argv[1] = (char *)"shell";
+    argv[2] = (char *)"-c";
+    argv[3] = (char *)"uname -s && sw_vers -productName";
+    argv[4] = NULL;
+
+    vt = vterm_new(24, 80);
+    CHECK(vt != NULL);
+    if (vt == NULL) {
+        free(masa);
+        return;
+    }
+    vterm_set_utf8(vt, 1);
+    vterm_obtain_screen(vt);
+    vterm_screen_reset(vterm_obtain_screen(vt), 1);
+
+    rc = masa_pty_open(&pty, 24, 80, argv, NULL);
+    if (rc != 0) {
+        printf("  SKIP cannot open a pseudo-terminal: %s\n", strerror(errno));
+        g_skipped++;
+        vterm_free(vt);
+        free(masa);
+        return;
+    }
+
+    rc = masa_gui_pump(&pty, vt, 500, 8000);
+    CHECK(rc >= 0);
+
+    screen_dump(vt, text, sizeof(text));
+    CHECK_CONTAINS(text, "Darwin");
+    CHECK_CONTAINS(text, "macOS");
+
+    masa_pty_close(&pty);
+    vterm_free(vt);
+    free(masa);
+}
+
+static void test_pty_resize(void)
+{
+    char *masa = find_masa();
+    struct masa_pty pty;
+    char *argv[5];
+    int rc;
+
+    printf("[ RUN  ] test_pty_resize\n");
+
+    if (masa == NULL) {
+        printf("  SKIP masa executable not found\n");
+        g_skipped++;
+        return;
+    }
+
+    argv[0] = masa;
+    argv[1] = (char *)"shell";
+    argv[2] = (char *)"-c";
+    argv[3] = (char *)"true";
+    argv[4] = NULL;
+
+    rc = masa_pty_open(&pty, 24, 80, argv, NULL);
+    if (rc != 0) {
+        printf("  SKIP cannot open a pseudo-terminal\n");
+        g_skipped++;
+        free(masa);
+        return;
+    }
+
+    CHECK(masa_pty_set_size(&pty, 40, 120) == 0);
+    CHECK(masa_pty_write(&pty, "exit\n", 5) >= 0);
+
+    masa_pty_close(&pty);
+    free(masa);
+}
+
+static void test_headless_sdl_render(void)
+{
+    struct masa_gui *gui;
+    char err[256];
+    int rows = 0;
+    int cols = 0;
+
+    printf("[ RUN  ] test_headless_sdl_render\n");
+
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+
+    err[0] = '\0';
+    gui = masa_gui_init("masa \xe2\x80\x94 Darwin", 640, 400, err, sizeof(err));
+    if (gui == NULL) {
+        printf("  SKIP SDL init failed: %s\n", err[0] ? err : "?");
+        g_skipped++;
+        return;
+    }
+
+    masa_gui_size(gui, &rows, &cols);
+    CHECK(rows > 0);
+    CHECK(cols > 0);
+
+    /* A little output plus colour, then a frame. */
+    masa_gui_feed(gui, "\x1b[31mhello\x1b[0m \x1b[1;34mworld\x1b[0m\r\n", 30);
+    masa_gui_render(gui);
+
+    /* Resize and redraw. */
+    masa_gui_resize(gui, 800, 520);
+    masa_gui_size(gui, &rows, &cols);
+    CHECK(rows > 0);
+    CHECK(cols > 0);
+    masa_gui_render(gui);
+
+    /* Screen text extraction must see the fed line. */
+    {
+        char text[4096];
+
+        masa_gui_screen_text(gui, text, sizeof(text));
+        CHECK_CONTAINS(text, "hello");
+        CHECK_CONTAINS(text, "world");
+    }
+
+    masa_gui_shutdown(gui);
+}
+
+static void test_shell_argv_env(void)
+{
+    char **argv;
+    char **env;
+    int found_term = 0;
+    int i;
+
+    printf("[ RUN  ] test_shell_argv_env\n");
+
+    argv = masa_gui_shell_argv();
+    CHECK(argv != NULL);
+    if (argv != NULL) {
+        CHECK(argv[0] != NULL);
+        CHECK(argv[1] != NULL);
+        CHECK(strcmp(argv[1], "shell") == 0);
+        CHECK(argv[2] == NULL);
+        /* Freeing must not touch any string literal. */
+        masa_gui_free_argv(argv);
+    }
+
+    env = masa_gui_shell_env();
+    CHECK(env != NULL);
+    if (env != NULL) {
+        for (i = 0; env[i] != NULL; i++) {
+            if (strcmp(env[i], "TERM=xterm-256color") == 0) {
+                found_term = 1;
+            }
+        }
+        CHECK(found_term);
+        masa_gui_free_argv(env);
+    }
+}
+
+/* Drive the real entry point headless: it must spawn `masa shell` on a
+ * PTY, render a few frames and tear down cleanly (this path frees the
+ * argv/env arrays, so it guards against the literal-free bug). */
+static void test_gui_main_headless(void)
+{
+    char *masa = find_masa();
+    char *argv[5];
+    int rc;
+
+    printf("[ RUN  ] test_gui_main_headless\n");
+
+    if (masa == NULL) {
+        printf("  SKIP masa executable not found\n");
+        g_skipped++;
+        return;
+    }
+
+    setenv("MASA_BIN", masa, 1);
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+
+    argv[0] = (char *)"masa-term";
+    argv[1] = (char *)"--headless";
+    argv[2] = (char *)"--frames";
+    argv[3] = (char *)"3";
+    argv[4] = NULL;
+
+    rc = masa_gui_main(4, argv);
+    CHECK(rc == 0);
+
+    free(masa);
+}
+
+int main(void)
+{
+    printf("masa-term GUI tests\n");
+
+    test_pty_shell_through_vterm();
+    test_pty_resize();
+    test_shell_argv_env();
+    test_headless_sdl_render();
+    test_gui_main_headless();
+
+    printf("\n%d tests run, %d failed, %d skipped\n",
+           g_run, g_failed, g_skipped);
+    return (g_failed == 0) ? 0 : 1;
+}

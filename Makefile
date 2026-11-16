@@ -34,7 +34,19 @@ OBJ     := $(SRC:src/%.c=$(OBJDIR)/%.o)
 TEST_SRC := tests/test_masa.c $(SRC)
 TEST_CFLAGS := -DMASA_NO_MAIN
 
-.PHONY: all test clean run android
+# --- Optional GUI terminal (masa-term) --------------------------------
+# Kept out of SRC/OBJ so the core tool and its tests stay dependency-free
+# and keep building for Android and Windows.  Build with `make gui`.
+GUI_BIN      := build/masa-term
+# The GUI is POSIX-only (src/pty_posix.c); it reuses the POSIX host
+# services for masa_self_path()/masa_which() when locating the masa binary.
+GUI_SRC      := src/gui_term.c src/pty_posix.c
+GUI_DEPS     := $(GUI_SRC) src/platform_posix.c
+GUI_CFLAGS  ?= $(shell pkg-config --cflags sdl2 SDL2_ttf vterm 2>/dev/null)
+GUI_LIBS    ?= $(shell pkg-config --libs sdl2 SDL2_ttf vterm 2>/dev/null) -lutil
+GUI_TESTBIN  := build/test_gui
+
+.PHONY: all test clean run android gui test-gui
 
 # Android NDK cross-compile: `make android` builds an aarch64-linux-android
 # binary with the NDK toolchain (override with ANDROID_CC).  The NDK does
@@ -67,6 +79,24 @@ test: $(TESTBIN) $(BIN)
 
 run: $(BIN)
 	./$(BIN)
+
+# Build the GUI terminal.  Needs libsdl2-dev, libsdl2-ttf-dev and
+# libvterm-dev (pkg-config resolves the flags); override GUI_CFLAGS/
+# GUI_LIBS when the headers are not on the default pkg-config path.  The
+# core binary is built too because masa-term runs `masa shell` on the PTY.
+gui: $(GUI_BIN) $(BIN)
+
+$(GUI_BIN): $(GUI_DEPS) $(HEADERS) include/masa_gui.h | $(OBJDIR)
+	$(CC) $(CFLAGS) $(GUI_CFLAGS) $(GUI_DEPS) -o $@ $(LDFLAGS) $(GUI_LIBS)
+
+# The GUI tests reuse the core sources for the CLI/PTY plumbing and drive
+# `masa shell`, so the core binary is built too.
+test-gui: $(GUI_TESTBIN) $(BIN)
+	SDL_VIDEODRIVER=dummy ./$(GUI_TESTBIN)
+
+$(GUI_TESTBIN): tests/test_gui.c $(GUI_SRC) $(SRC) $(HEADERS) include/masa_gui.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -DMASA_NO_MAIN $(GUI_CFLAGS) $(GUI_SRC) $(SRC) \
+	    tests/test_gui.c -o $@ $(LDFLAGS) $(GUI_LIBS)
 
 clean:
 	rm -rf $(OBJDIR)

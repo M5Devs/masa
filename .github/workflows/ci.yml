@@ -34,6 +34,30 @@ jobs:
       - name: Report version
         run: ./build/masa version
 
+  # The optional GUI terminal (`masa-term`) links SDL2, SDL2_ttf and
+  # libvterm.  It is a separate target so the core tool above stays
+  # dependency-free; here we build it and run its tests headless.
+  gui:
+    name: gui (masa-term)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libvterm-dev \
+            fonts-dejavu-core
+
+      - name: Build masa-term
+        run: make gui
+
+      - name: Report the GUI binary
+        run: file build/masa-term
+
+      - name: Test (headless)
+        run: SDL_VIDEODRIVER=dummy make test-gui
+
   # The same C11 sources must compile cleanly for Android with the NDK
   # clang under -Wall -Wextra -Werror, and the NDK cross-build is driven
   # by `make android`.  The NDK does not ship libasan, so this job builds
