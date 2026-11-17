@@ -17,11 +17,15 @@
  * process stays leak-free even if the program never balanced its retains.
  */
 
-#include "danroot_internal.h"
-
 #ifndef _WIN32
 
 #define _POSIX_C_SOURCE 200809L
+
+#endif
+
+#include "danroot_internal.h"
+
+#ifndef _WIN32
 
 #include <stdarg.h>
 #include <stdint.h>

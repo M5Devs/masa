@@ -350,6 +350,9 @@ static void reset_masa_env(void)
     set_env(MASA_SHIM_TARGET_ENV, NULL);
     set_env(MASA_KEEP_PS1_ENV, NULL);
     set_env(MASA_DANROOT_ROOT_ENV, NULL);
+    set_env(MASA_QEMU_AARCH64_ENV, NULL);
+    set_env(MASA_DANROOT_AARCH64_ENV, NULL);
+    set_env(MASA_DANROOT_NO_BRIDGE_ENV, NULL);
     set_env("PATH", g_original_path);
 }
 
@@ -3955,6 +3958,10 @@ static void test_run_rejects_cputype_mismatch(void)
     argv[2] = exe;
     argv[3] = NULL;
 
+    /* Disable the cross-architecture bridge so the mismatch guard itself
+     * is what answers, whether or not qemu/masa-aarch64 are installed. */
+    set_env(MASA_DANROOT_NO_BRIDGE_ENV, "1");
+
     rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
     CHECK(rc != 0);
     CHECK_CONTAINS(err, "architecture mismatch");
@@ -6145,6 +6152,199 @@ static void test_danroot_objc(void)
     reset_masa_env();
 }
 
+/*
+ * Build build/masa-aarch64 on demand and return its absolute path.  The
+ * cross-architecture bridge needs this aarch64 build of Masa as the ARM64
+ * side of the runner.  Returns 0 on success, -1 when the build is not
+ * possible here (the caller then SKIPs).
+ */
+static int ensure_masa_aarch64(char *out, size_t outcap)
+{
+    char cwd[4096];
+
+    if (access("build/masa-aarch64", X_OK) != 0) {
+        if (system("make aarch64 >/dev/null 2>&1") != 0) {
+            return -1;
+        }
+    }
+    if (access("build/masa-aarch64", X_OK) != 0) {
+        return -1;
+    }
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        return -1;
+    }
+    if (snprintf(out, outcap, "%s/build/masa-aarch64", cwd) >= (int)outcap) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Cross-architecture bridge: build an arm64-apple-darwin Mach-O image and
+ * run it on this x86_64 host through qemu-aarch64 driving masa-aarch64.
+ * Verifies the program's stdout and its exact exit status (42).
+ */
+static void test_danroot_arm64_bridge_on_x86_64(void)
+{
+    char dir[] = "/tmp/masa_bridge_XXXXXX";
+    char aarch64[4096];
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *source =
+        "#include <Foundation/Foundation.h>\n"
+        "#include <objc/objc.h>\n"
+        "#include <objc/runtime.h>\n"
+        "#include <objc/message.h>\n"
+        "#include <stdio.h>\n"
+        "#include <stdlib.h>\n"
+        "int main(void) {\n"
+        "    char *p = malloc(32);\n"
+        "    char buf[32];\n"
+        "    id cls, str;\n"
+        "    const char *utf;\n"
+        "    unsigned long len;\n"
+        "    if (p == NULL) return 3;\n"
+        "    p[0] = 'o'; p[1] = 'k'; p[2] = '\\0';\n"
+        "    printf(\"arm64 bridge %s\\n\", p);\n"
+        "    free(p);\n"
+        "    snprintf(buf, sizeof(buf), \"fmt-%d-%s\", 7, \"z\");\n"
+        "    printf(\"snprintf %s\\n\", buf);\n"
+        "    cls = (id)objc_getClass(\"NSString\");\n"
+        "    str = objc_msgSend(cls, sel_registerName(\"stringWithUTF8String:\"),\n"
+        "                       \"objc-bridge\");\n"
+        "    utf = (const char *)objc_msgSend(str,\n"
+        "        sel_registerName(\"UTF8String\"));\n"
+        "    len = (unsigned long)objc_msgSend(str, sel_registerName(\"length\"));\n"
+        "    printf(\"objc %s len=%lu\\n\", utf, len);\n"
+        "    NSLog(str);\n"
+        "    return 42;\n"
+        "}\n";
+    int rc;
+
+#if !defined(__x86_64__)
+    printf("  SKIP the bridge is only exercised on x86_64 hosts\n");
+    g_skipped++;
+    return;
+#endif
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("qemu-aarch64")) {
+        printf("  SKIP qemu-aarch64 is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (!tool_available("aarch64-linux-gnu-gcc")) {
+        printf("  SKIP aarch64-linux-gnu-gcc is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (ensure_masa_aarch64(aarch64, sizeof(aarch64)) != 0) {
+        printf("  SKIP could not build build/masa-aarch64\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_framework(dir, "arm64-apple-darwin", "bridged", source,
+                              "Foundation", exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    reset_masa_env();
+    set_env(MASA_DANROOT_AARCH64_ENV, aarch64);
+
+    argv[0] = "masa";
+    argv[1] = "danroot";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 42) {
+        fprintf(stderr, "  bridge stdout: %s\n  bridge stderr: %s\n", out,
+                err);
+    }
+    CHECK(rc == 42);
+    CHECK_CONTAINS(out, "arm64 bridge ok");
+    CHECK_CONTAINS(out, "snprintf fmt-7-z");
+    CHECK_CONTAINS(out, "objc objc-bridge len=11");
+    CHECK_CONTAINS(err, "objc-bridge"); /* NSLog writes to stderr */
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * Bridge fallbacks: when the bridge is disabled, or its runner points at a
+ * path that is not executable, an arm64 image on an x86_64 host must fall
+ * back to the plain architecture-mismatch diagnostic and never crash.
+ */
+static void test_danroot_arm64_bridge_fallbacks(void)
+{
+    static const char *source = "int main(void) { return 0; }\n";
+    char dir[] = "/tmp/masa_bridge_fb_XXXXXX";
+    char exe[4096];
+    char out[1024];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+#if !defined(__x86_64__)
+    printf("  SKIP the bridge is only exercised on x86_64 hosts\n");
+    g_skipped++;
+    return;
+#endif
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+    snprintf(exe, sizeof(exe), "%s/prog", dir);
+    if (build_macho(dir, "arm64-apple-darwin", source, exe) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    /* MASA_DANROOT_NO_BRIDGE=1 disables the bridge outright. */
+    reset_masa_env();
+    set_env(MASA_DANROOT_NO_BRIDGE_ENV, "1");
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "architecture mismatch");
+
+    /* A runner that is not an executable binary is treated as absent. */
+    reset_masa_env();
+    set_env(MASA_QEMU_AARCH64_ENV, "/nonexistent/qemu-aarch64");
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "architecture mismatch");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
@@ -6253,6 +6453,8 @@ int main(void)
     RUN(test_danroot_arm64_stack_protector);
     RUN(test_danroot_corefoundation);
     RUN(test_danroot_objc);
+    RUN(test_danroot_arm64_bridge_on_x86_64);
+    RUN(test_danroot_arm64_bridge_fallbacks);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

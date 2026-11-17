@@ -20,6 +20,18 @@ steps:
       - make
       - make test
 
+  # The cross-architecture bridge runs an arm64-apple-darwin image on an
+  # x86_64 host through qemu-aarch64 driving an aarch64 build of Masa.
+  aarch64:
+    image: debian:bookworm-slim
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends build-essential clang make
+        gcc-aarch64-linux-gnu qemu-user
+      - make
+      - make aarch64
+      - make test
+
   # masa-term needs SDL2, SDL2_ttf and libvterm; the GUI tests run
   # headless through the SDL dummy video driver.
   gui:

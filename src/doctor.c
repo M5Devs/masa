@@ -68,6 +68,22 @@ static const char *const ar_fallbacks[] = {"llvm-ar", "ar", NULL};
 static const char *const ranlib_fallbacks[] = {"llvm-ranlib", "ranlib", NULL};
 static const char *const nm_fallbacks[] = {"llvm-nm", "nm", NULL};
 static const char *const objdump_fallbacks[] = {"llvm-objdump", "objdump", NULL};
+static const char *const qemu_fallbacks[] = {"qemu-aarch64",
+                                             "qemu-aarch64-static", NULL};
+static const char *const aarch64_cc_fallbacks[] = {"aarch64-linux-gnu-gcc",
+                                                   NULL};
+
+/*
+ * Cross-architecture Apple Silicon readiness: an arm64 Mach-O image can run
+ * on an x86_64 host through qemu-aarch64 driving an aarch64 build of Masa.
+ * Both pieces are optional, so an absent one is a [WARN], not a failure.
+ */
+static void check_cross_arch(void)
+{
+    report_tool("qemu-aarch64", "qemu-aarch64", qemu_fallbacks, 0);
+    report_tool("aarch64-gcc", "aarch64-linux-gnu-gcc", aarch64_cc_fallbacks,
+                0);
+}
 
 static int check_compiler(void)
 {
@@ -161,6 +177,7 @@ int masa_doctor_main(int argc, char *const argv[])
     }
 
     check_sdk();
+    check_cross_arch();
 
     report(MASA_DOCTOR_OK, "target",
            (target != NULL && target[0] != '\0') ? target

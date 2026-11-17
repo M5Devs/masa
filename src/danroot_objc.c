@@ -17,11 +17,15 @@
  * leaves nothing behind for AddressSanitizer to report.
  */
 
-#include "danroot_internal.h"
-
 #ifndef _WIN32
 
 #define _POSIX_C_SOURCE 200809L
+
+#endif
+
+#include "danroot_internal.h"
+
+#ifndef _WIN32
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -186,9 +190,11 @@ static void *dr_objc_getClass(const char *name)
 
 /*
  * objc_msgSend is variadic: the extra words are the message arguments,
- * read on demand for the one selector that takes a C string.
+ * read on demand for the one selector that takes a C string.  The core
+ * takes a pointer to a va_list so the native entry point and the aarch64
+ * stack trampoline can share it.
  */
-static void *dr_objc_msgSend(void *recv, void *sel, ...)
+static void *dr_objc_msgSend_core(void *recv, void *sel, va_list *ap)
 {
     dr_objc_selector *s = (dr_objc_selector *)sel;
     const char *name = (s != NULL) ? s->name : NULL;
@@ -206,11 +212,8 @@ static void *dr_objc_msgSend(void *recv, void *sel, ...)
         if (strcmp(name, "stringWithUTF8String:") == 0) {
             const char *cstr;
             dr_objc_object *o;
-            va_list ap;
 
-            va_start(ap, sel);
-            cstr = va_arg(ap, const char *);
-            va_end(ap);
+            cstr = va_arg(*ap, const char *);
             o = dr_object_new(&dr_class_nsstring);
             if (o == NULL) {
                 return NULL;
@@ -258,6 +261,32 @@ static void *dr_objc_msgSend(void *recv, void *sel, ...)
     }
     return NULL;
 }
+
+#if DR_DARWIN_VARARGS
+__attribute__((used)) static void *dr_objc_msgSend_stack(void *recv, void *sel,
+                                                       void *stack)
+{
+    va_list ap;
+    void *r;
+
+    dr_va_from_stack(&ap, stack);
+    r = dr_objc_msgSend_core(recv, sel, &ap);
+    return r;
+}
+extern void *dr_objc_msgSend(void *, void *, ...);
+DR_VARARG_TRAMPOLINE(dr_objc_msgSend, dr_objc_msgSend_stack, x2);
+#else
+static void *dr_objc_msgSend(void *recv, void *sel, ...)
+{
+    va_list ap;
+    void *r;
+
+    va_start(ap, sel);
+    r = dr_objc_msgSend_core(recv, sel, &ap);
+    va_end(ap);
+    return r;
+}
+#endif
 
 static void *dr_objc_autoreleasePoolPush(void)
 {
@@ -310,13 +339,12 @@ static const char *dr_objc_cstr_of(const void *p)
     return (const char *)p;
 }
 
-static void dr_objc_NSLog(void *format, ...)
+static void dr_objc_NSLog_core(void *format, va_list *ap)
 {
     const char *fmt = dr_objc_cstr_of(format);
     time_t now;
     struct tm tmv;
     char ts[32];
-    va_list ap;
 
     now = time(NULL);
     if (localtime_r(&now, &tmv) != NULL) {
@@ -326,13 +354,32 @@ static void dr_objc_NSLog(void *format, ...)
     }
     fprintf(stderr, "%s Masa[%d] ", ts, (int)getpid());
     if (fmt != NULL) {
-        va_start(ap, format);
-        vfprintf(stderr, fmt, ap);
-        va_end(ap);
+        vfprintf(stderr, fmt, *ap);
     }
     fputc('\n', stderr);
     fflush(stderr);
 }
+
+#if DR_DARWIN_VARARGS
+__attribute__((used)) static void dr_objc_NSLog_stack(void *format, void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    dr_objc_NSLog_core(format, &ap);
+}
+extern void dr_objc_NSLog(void *, ...);
+DR_VARARG_TRAMPOLINE(dr_objc_NSLog, dr_objc_NSLog_stack, x1);
+#else
+static void dr_objc_NSLog(void *format, ...)
+{
+    va_list ap;
+
+    va_start(ap, format);
+    dr_objc_NSLog_core(format, &ap);
+    va_end(ap);
+}
+#endif
 
 /* --- provider plumbing -------------------------------------------- */
 

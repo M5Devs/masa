@@ -99,6 +99,37 @@ jobs:
           make test
           ANDROID_CC="$ANDROID_CC" ./build/test_masa
 
+  # The cross-architecture bridge runs an arm64-apple-darwin Mach-O image on
+  # an x86_64 host: qemu-aarch64 executes an aarch64 build of Masa
+  # (`make aarch64`), which loads the arm64 image natively.  This job builds
+  # both sides and runs the bridge end-to-end.
+  aarch64:
+    name: aarch64 cross-arch bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm \
+            gcc-aarch64-linux-gnu qemu-user
+
+      - name: Build the host tool
+        run: make
+
+      - name: Build the ARM64 side of the bridge
+        run: make aarch64
+
+      - name: Check the ARM64 binary
+        run: file build/masa-aarch64
+
+      - name: Test (the bridge test runs against masa-aarch64)
+        run: make test
+
+      - name: Report the cross-arch readiness
+        run: ./build/masa doctor
+
   windows-cross:
     name: windows cross-compile (mingw-w64)
     runs-on: ubuntu-latest

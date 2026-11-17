@@ -48,7 +48,7 @@ GUI_CFLAGS  ?= $(shell pkg-config --cflags sdl2 SDL2_ttf vterm 2>/dev/null)
 GUI_LIBS    ?= $(shell pkg-config --libs sdl2 SDL2_ttf vterm 2>/dev/null) -lutil
 GUI_TESTBIN  := build/test_gui
 
-.PHONY: all test clean run android gui test-gui dist
+.PHONY: all test clean run android aarch64 gui test-gui dist
 
 # Android NDK cross-compile: `make android` builds an aarch64-linux-android
 # binary with the NDK toolchain (override with ANDROID_CC).  The NDK does
@@ -58,11 +58,24 @@ ANDROID_CC     ?= aarch64-linux-android24-clang
 ANDROID_CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude
 ANDROID_BIN    := build/android/masa
 
+# Linux ARM64 build: `make aarch64` produces build/masa-aarch64 with the
+# aarch64-linux-gnu toolchain (override with AARCH64_CC).  The cross
+# toolchain ships no libasan, so AddressSanitizer is off; this binary is the
+# ARM64 side of the Danroot cross-architecture bridge, run under qemu-aarch64
+# to execute arm64-apple-darwin images on an x86_64 host.
+AARCH64_CC     ?= aarch64-linux-gnu-gcc
+AARCH64_CFLAGS := -std=c11 -Wall -Wextra -Werror -Iinclude
+AARCH64_BIN    := build/masa-aarch64
+
 all: $(BIN)
 
 android: $(SRC) $(HEADERS)
 	mkdir -p $(dir $(ANDROID_BIN))
 	$(ANDROID_CC) $(ANDROID_CFLAGS) $(SRC) -o $(ANDROID_BIN)
+
+aarch64: $(SRC) $(HEADERS)
+	mkdir -p $(dir $(AARCH64_BIN))
+	$(AARCH64_CC) $(AARCH64_CFLAGS) $(SRC) -o $(AARCH64_BIN)
 
 $(OBJDIR)/%.o: src/%.c $(HEADERS) | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@

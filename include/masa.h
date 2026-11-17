@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.4.0"
+#define MASA_VERSION "1.5.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -68,6 +68,16 @@ extern "C" {
  * set (or passed as `--root <dir>`), paths under the macOS system prefixes
  * are mapped beneath this directory instead of the host root. */
 #define MASA_DANROOT_ROOT_ENV "MASA_DANROOT_ROOT"
+
+/* Cross-architecture bridge.  On an x86_64 host an arm64 Mach-O image is
+ * handed to a user-mode ARM64 runner (qemu-aarch64) driving an aarch64
+ * build of Masa; these override the PATH / sibling-binary discovery of the
+ * runner and the bridge binary. */
+#define MASA_QEMU_AARCH64_ENV "MASA_QEMU_AARCH64"
+#define MASA_DANROOT_AARCH64_ENV "MASA_DANROOT_AARCH64"
+/* Set to 1 to disable the cross-architecture bridge entirely, so an arm64
+ * image on an x86_64 host reports the plain architecture mismatch. */
+#define MASA_DANROOT_NO_BRIDGE_ENV "MASA_DANROOT_NO_BRIDGE"
 
 /* Exit status returned when the wrapper cannot spawn a tool at all. */
 #define MASA_EXIT_SPAWN_ERROR 127

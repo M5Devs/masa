@@ -459,6 +459,18 @@ static void dr_stat_to_darwin(const struct stat *h, struct dr_darwin_stat *d)
 
 /* --- standard I/O ------------------------------------------------- */
 
+#if DR_DARWIN_VARARGS
+__attribute__((used)) static int dr_shim_printf_stack(const char *format,
+                                                    void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    return vprintf(format, ap);
+}
+extern int dr_shim_printf(const char *, ...);
+DR_VARARG_TRAMPOLINE(dr_shim_printf, dr_shim_printf_stack, x1);
+#else
 static int dr_shim_printf(const char *format, ...)
 {
     va_list ap;
@@ -469,6 +481,7 @@ static int dr_shim_printf(const char *format, ...)
     va_end(ap);
     return n;
 }
+#endif
 
 static int dr_shim_puts(const char *s)
 {
@@ -480,6 +493,19 @@ static int dr_shim_putchar(int c)
     return putchar(c);
 }
 
+#if DR_DARWIN_VARARGS
+__attribute__((used)) static int dr_shim_fprintf_stack(void *stream,
+                                                    const char *format,
+                                                    void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    return vfprintf((FILE *)stream, format, ap);
+}
+extern int dr_shim_fprintf(void *, const char *, ...);
+DR_VARARG_TRAMPOLINE(dr_shim_fprintf, dr_shim_fprintf_stack, x2);
+#else
 static int dr_shim_fprintf(void *stream, const char *format, ...)
 {
     va_list ap;
@@ -490,6 +516,7 @@ static int dr_shim_fprintf(void *stream, const char *format, ...)
     va_end(ap);
     return n;
 }
+#endif
 
 static void *dr_shim_fopen(const char *path, const char *mode)
 {
@@ -553,6 +580,57 @@ static int dr_shim_ferror(void *stream)
     return ferror((FILE *)stream);
 }
 
+#if DR_DARWIN_VARARGS
+__attribute__((used)) static int dr_shim_snprintf_stack(char *buf, size_t n,
+                                                    const char *format,
+                                                    void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    return vsnprintf(buf, n, format, ap);
+}
+extern int dr_shim_snprintf(char *, size_t, const char *, ...);
+DR_VARARG_TRAMPOLINE(dr_shim_snprintf, dr_shim_snprintf_stack, x3);
+
+/*
+ * Darwin's va_list is a plain pointer to the next argument; a caller that
+ * built one has already advanced it, so the pointer itself is the stack
+ * position to read from.
+ */
+__attribute__((used)) static int dr_shim_vsnprintf(char *buf, size_t n,
+                              const char *format, void *dap)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, dap);
+    return vsnprintf(buf, n, format, ap);
+}
+
+__attribute__((used)) static int dr_shim_sprintf_stack(char *buf,
+                                                    const char *format,
+                                                    void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    return vsprintf(buf, format, ap);
+}
+extern int dr_shim_sprintf(char *, const char *, ...);
+DR_VARARG_TRAMPOLINE(dr_shim_sprintf, dr_shim_sprintf_stack, x2);
+
+__attribute__((used)) static int dr_shim_sscanf_stack(const char *s,
+                                                    const char *format,
+                                                    void *stack)
+{
+    va_list ap;
+
+    dr_va_from_stack(&ap, stack);
+    return vsscanf(s, format, ap);
+}
+extern int dr_shim_sscanf(const char *, const char *, ...);
+DR_VARARG_TRAMPOLINE(dr_shim_sscanf, dr_shim_sscanf_stack, x2);
+#else
 static int dr_shim_snprintf(char *buf, size_t n, const char *format, ...)
 {
     va_list ap;
@@ -591,6 +669,7 @@ static int dr_shim_sscanf(const char *s, const char *format, ...)
     va_end(ap);
     return r;
 }
+#endif
 
 /* --- file descriptors --------------------------------------------- */
 
@@ -2724,8 +2803,18 @@ static struct dr_module *dr_load_module(struct dr_loader *ld, const char *path,
             goto fail;
         }
         if (have != (uint32_t)want) {
-            snprintf(err, errcap, "architecture mismatch: '%s' is %s, host is %s",
-                     path, dr_cpu_name((int)have), dr_cpu_name(want));
+            if (have == (uint32_t)DR_CPU_TYPE_ARM64 &&
+                want == (int)DR_CPU_TYPE_X86_64) {
+                snprintf(err, errcap,
+                         "architecture mismatch: '%s' is arm64, host is "
+                         "x86_64 (install qemu-aarch64 and masa-aarch64 to "
+                         "run it through the bridge)",
+                         path);
+            } else {
+                snprintf(err, errcap,
+                         "architecture mismatch: '%s' is %s, host is %s",
+                         path, dr_cpu_name((int)have), dr_cpu_name(want));
+            }
             goto fail;
         }
     }
@@ -2880,6 +2969,223 @@ static int dr_protect_module(struct dr_module *m, char *err, size_t errcap)
 }
 
 /*
+ * ------------------------------------------------------------------
+ * Cross-architecture bridge
+ * ------------------------------------------------------------------
+ *
+ * The loader executes an image by mapping it and jumping to its entry
+ * point, so it can only run an image whose cputype matches the host.  When
+ * an arm64 image arrives at an x86_64 host, a user-mode ARM64 runner
+ * (qemu-aarch64) driving an aarch64 build of Masa can execute it instead:
+ * the runner emulates the CPU, and the aarch64 Masa maps and jumps to the
+ * arm64 image exactly as a native arm64 host would.  The bridge discovers
+ * both pieces, spawns `qemu-aarch64 masa-aarch64 danroot [--root <dir>]
+ * <image> <args...>` and passes the runner's exit status straight through.
+ */
+
+
+/*
+ * 1 when path is a dynamically linked ELF executable.  qemu-aarch64 needs
+ * `-L <sysroot>` to find the guest loader and libraries for such a binary;
+ * a static one runs with no sysroot at all.  Best-effort: anything we
+ * cannot parse is reported as not dynamic, so the sysroot is only added
+ * when we are sure it is needed.
+ */
+static int dr_elf_is_dynamic(const char *path)
+{
+    unsigned char ident[20];
+    FILE *f;
+    size_t n;
+
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    n = fread(ident, 1, sizeof(ident), f);
+    fclose(f);
+    if (n < sizeof(ident)) {
+        return 0;
+    }
+    if (!(ident[0] == 0x7f && ident[1] == 'E' && ident[2] == 'L' &&
+          ident[3] == 'F')) {
+        return 0;
+    }
+    /* e_type (little-endian) at offset 16: ET_DYN (3) is a PIE executable. */
+    return (ident[16] == 3 && ident[17] == 0);
+}
+
+/* 1 when path names an existing, executable regular file. */
+static int dr_is_exec(const char *path)
+{
+    struct stat st;
+
+    return (path != NULL && path[0] != '\0' && stat(path, &st) == 0 &&
+            S_ISREG(st.st_mode) && access(path, X_OK) == 0);
+}
+
+/*
+ * 1 when path opens with a 64-bit little-endian arm64 Mach-O executable
+ * header.  A cheap read of the 16-byte header lets dr_run decide whether to
+ * reach for the bridge without paying for a full module load.
+ */
+static int dr_peek_is_arm64_exec(const char *path)
+{
+    unsigned char hdr[16];
+    FILE *f;
+    size_t n;
+
+    f = fopen(path, "rb");
+    if (f == NULL) {
+        return 0;
+    }
+    n = fread(hdr, 1, sizeof(hdr), f);
+    fclose(f);
+    if (n < sizeof(hdr)) {
+        return 0;
+    }
+    return dr_rd32(hdr) == DR_MH_MAGIC_64 &&
+           dr_rd32(hdr + 4) == DR_CPU_TYPE_ARM64 &&
+           dr_rd32(hdr + 12) == DR_MH_EXECUTE;
+}
+
+/*
+ * Find the ARM64 runner: MASA_QEMU_AARCH64 wins, then qemu-aarch64 and
+ * qemu-aarch64-static on PATH.  Returns a malloc'd path the caller frees.
+ */
+static char *dr_find_qemu(void)
+{
+    const char *env = getenv(MASA_QEMU_AARCH64_ENV);
+    char *path;
+
+    if (env != NULL && env[0] != '\0') {
+        return dr_is_exec(env) ? strdup(env) : NULL;
+    }
+    path = masa_which("qemu-aarch64");
+    if (path == NULL) {
+        path = masa_which("qemu-aarch64-static");
+    }
+    return path;
+}
+
+/*
+ * Find the aarch64 build of Masa: MASA_DANROOT_AARCH64 wins, then a
+ * `masa-aarch64` next to the running binary, then build/masa-aarch64
+ * relative to the current directory, then `masa-aarch64` on PATH.
+ * Returns a malloc'd path the caller frees.
+ */
+static char *dr_find_aarch64_masa(void)
+{
+    const char *env = getenv(MASA_DANROOT_AARCH64_ENV);
+    char candidate[DR_PATH_MAX];
+    char *self;
+    char *slash;
+
+    if (env != NULL && env[0] != '\0') {
+        return dr_is_exec(env) ? strdup(env) : NULL;
+    }
+
+    self = masa_self_path();
+    if (self != NULL) {
+        slash = strrchr(self, '/');
+        if (slash != NULL) {
+            *slash = '\0';
+            if (dr_pathfmt(candidate, sizeof(candidate), "%s/masa-aarch64",
+                           self) < (int)sizeof(candidate) &&
+                dr_is_exec(candidate)) {
+                free(self);
+                return strdup(candidate);
+            }
+        }
+        free(self);
+    }
+
+    if (dr_is_exec("build/masa-aarch64")) {
+        return strdup("build/masa-aarch64");
+    }
+    return masa_which("masa-aarch64");
+}
+
+/*
+ * Try to run an arm64 image on this x86_64 host through the bridge.  On
+ * success the runner's exit status is returned and *handled is set to 1;
+ * when the bridge is unavailable *handled stays 0 and the caller falls
+ * back to the architecture-mismatch diagnostic.  MASA_DANROOT_NO_BRIDGE=1
+ * disables the bridge entirely.
+ */
+static int dr_try_bridge(const char *path, int prog_argc,
+                         char *const prog_argv[], int *handled)
+{
+    char *qemu;
+    char *bridge;
+    char **argv;
+    const char *root = getenv(MASA_DANROOT_ROOT_ENV);
+    int argc = 0;
+    int rc;
+
+    *handled = 0;
+
+    if (getenv(MASA_DANROOT_NO_BRIDGE_ENV) != NULL) {
+        return 1;
+    }
+
+    qemu = dr_find_qemu();
+    if (qemu == NULL) {
+        return 1;
+    }
+    bridge = dr_find_aarch64_masa();
+    if (bridge == NULL) {
+        free(qemu);
+        return 1;
+    }
+
+    /*
+     * qemu-aarch64  masa-aarch64  danroot  [--root <dir>]  <image> <args...>
+     * plus the optional `-L <sysroot>`, the program arguments and a NULL.
+     */
+    argv = calloc((size_t)prog_argc + 8, sizeof(*argv));
+    if (argv == NULL) {
+        free(qemu);
+        free(bridge);
+        return 1;
+    }
+
+    argv[argc++] = qemu;
+    if (dr_elf_is_dynamic(bridge) &&
+        access("/usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1", F_OK) == 0) {
+        argv[argc++] = (char *)"-L";
+        argv[argc++] = (char *)"/usr/aarch64-linux-gnu";
+    }
+    argv[argc++] = bridge;
+    argv[argc++] = (char *)"danroot";
+    if (root != NULL && root[0] != '\0') {
+        argv[argc++] = (char *)"--root";
+        argv[argc++] = (char *)root;
+    }
+    argv[argc++] = (char *)path;
+    {
+        int i;
+
+        for (i = 1; i < prog_argc; i++) {
+            argv[argc++] = prog_argv[i];
+        }
+    }
+    argv[argc] = NULL;
+
+    rc = masa_spawn_wait((const char *const *)argv);
+
+    free(argv);
+    free(qemu);
+    free(bridge);
+
+    if (rc < 0) {
+        /* The runner could not be started after all: fall back cleanly. */
+        return 1;
+    }
+    *handled = 1;
+    return rc;
+}
+
+/*
  * Run the Mach-O image at path with the given program arguments.  prog_argv
  * is the caller's argument vector with prog_argv[0] naming the image, so
  * the loaded program receives the same argv[0] a native run would.
@@ -2896,6 +3202,21 @@ static int dr_run(const char *path, int prog_argc, char *const prog_argv[])
     char *apple[3];
     char exe_path[DR_PATH_MAX];
     int status;
+
+    /*
+     * A foreign-architecture image cannot be mapped here.  If it is an
+     * arm64 executable arriving at an x86_64 host, hand it to the
+     * cross-architecture bridge before anything else; when the bridge is
+     * unavailable we fall through to the mismatch diagnostic below.
+     */
+    if (dr_cpu_type() == (int)DR_CPU_TYPE_X86_64 && dr_peek_is_arm64_exec(path)) {
+        int handled = 0;
+        int bridge_rc = dr_try_bridge(path, prog_argc, prog_argv, &handled);
+
+        if (handled) {
+            return bridge_rc;
+        }
+    }
 
     memset(&ld, 0, sizeof(ld));
     err[0] = '\0';
