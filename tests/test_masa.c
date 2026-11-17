@@ -4045,6 +4045,481 @@ static void test_run_classic_dyld_info_fixups(void)
 
 
 /* ------------------------------------------------------------------ */
+/* Milestone 12: dynamic library (MH_DYLIB) loading                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Build dir/lib<name>.dylib from source with `masa cc -dynamiclib`,
+ * installing it as @rpath/lib<name>.dylib.  Returns 0 on success.
+ */
+static int build_dylib(const char *dir, const char *target,
+                       const char *source, const char *name)
+{
+    char sdk[4096];
+    char src[4096];
+    char out[4096];
+    char install_name[512];
+    char *argv[12];
+    char o[1024];
+    char e[4096];
+    int n = 0;
+    int rc;
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/%s.c", dir, name);
+    snprintf(out, sizeof(out), "%s/lib%s.dylib", dir, name);
+    snprintf(install_name, sizeof(install_name), "@rpath/lib%s.dylib", name);
+
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        return -1;
+    }
+    if (write_file(src, source) != 0) {
+        return -1;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = "-dynamiclib";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = out;
+    argv[n++] = "-install_name";
+    argv[n++] = install_name;
+    argv[n] = NULL;
+
+    rc = run_masa(argv, o, sizeof(o), e, sizeof(e));
+    if (rc != 0) {
+        fprintf(stderr, "  dylib cc stderr: %s\n", e);
+    }
+    return rc;
+}
+
+static const char *dylib_helper_source(void)
+{
+    return
+        "#include <string.h>\n"
+        "static int base = 40;\n"
+        "int helper_add(int x) { return base + x; }\n"
+        "const char *helper_tag(void) { return \"helper-v1\"; }\n"
+        "int helper_len(const char *s) { return (int)strlen(s); }\n";
+}
+
+static const char *dylib_main_source(void)
+{
+    return
+        "#include <stdio.h>\n"
+        "#include <string.h>\n"
+        "#include <sys/sysctl.h>\n"
+        "#include <dlfcn.h>\n"
+        "extern int helper_add(int x);\n"
+        "extern const char *helper_tag(void);\n"
+        "int main(void) {\n"
+        "    printf(\"add=%d tag=%s\\n\", helper_add(2), helper_tag());\n"
+        "    FILE *f = fopen(\"out.txt\", \"w\");\n"
+        "    if (f == NULL) { printf(\"fopen-fail\\n\"); return 1; }\n"
+        "    fwrite(\"masa-danroot\\n\", 1, 13, f);\n"
+        "    fclose(f);\n"
+        "    char b[64];\n"
+        "    f = fopen(\"out.txt\", \"r\");\n"
+        "    if (f == NULL) { printf(\"fopen2-fail\\n\"); return 1; }\n"
+        "    size_t n = fread(b, 1, sizeof(b) - 1, f);\n"
+        "    fclose(f);\n"
+        "    b[n] = '\\0';\n"
+        "    printf(\"file=%s\", b);\n"
+        "    char os[64];\n"
+        "    size_t len = sizeof(os);\n"
+        "    int rc = sysctlbyname(\"kern.ostype\", os, &len, NULL, 0);\n"
+        "    printf(\"ostype=%s rc=%d\\n\", os, rc);\n"
+        "    void *h = dlopen(\"@executable_path/libhelper.dylib\", RTLD_NOW);\n"
+        "    if (h == NULL) { printf(\"dlopen-fail\\n\"); return 2; }\n"
+        "    int (*a)(int) = (int (*)(int))dlsym(h, \"_helper_add\");\n"
+        "    const char *(*t)(void) = (const char *(*)(void))dlsym(h,"
+        " \"_helper_tag\");\n"
+        "    if (a == NULL || t == NULL) { printf(\"dlsym-fail\\n\"); return 3; }\n"
+        "    printf(\"dl=%d/%s\\n\", a(100), t());\n"
+        "    dlclose(h);\n"
+        "    return rc == 0 ? 0 : 4;\n"
+        "}\n";
+}
+
+/*
+ * Build a dylib + executable pair into dir and return the executable path
+ * in exe.  extra_args (may be NULL) is appended to the executable's link
+ * command.  Returns 0 on success.
+ */
+static int build_dylib_pair(const char *dir, const char *target,
+                            const char *main_source, const char *extra_args,
+                            char *exe, size_t excap)
+{
+    char sdk[4096];
+    char src[4096];
+    char libdir[4096];
+    char *argv[12];
+    char o[1024];
+    char e[4096];
+    int n = 0;
+    int rc;
+
+    snprintf(exe, excap, "%s/app", dir);
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/main.c", dir);
+    snprintf(libdir, sizeof(libdir), "-L%s", dir);
+
+    if (build_dylib(dir, target, dylib_helper_source(), "helper") != 0) {
+        return -1;
+    }
+
+    reset_masa_env();
+    if (write_file(src, main_source) != 0) {
+        return -1;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = exe;
+    argv[n++] = libdir;
+    argv[n++] = "-lhelper";
+    argv[n++] = "-Wl,-rpath,@executable_path";
+    if (extra_args != NULL) {
+        argv[n++] = (char *)extra_args;
+    }
+    argv[n] = NULL;
+
+    rc = run_masa(argv, o, sizeof(o), e, sizeof(e));
+    if (rc != 0) {
+        fprintf(stderr, "  exe cc stderr: %s\n", e);
+    }
+    return rc;
+}
+
+/*
+ * End-to-end dynamic-library test: a Mach-O executable that links against
+ * a Mach-O dylib (calls into it, does file I/O, calls sysctlbyname and
+ * dlopen/dlsym) must run under `masa danroot` and produce the expected
+ * output, file contents and exit status.
+ */
+static void test_run_loads_dylib(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_dylib_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char cwd[4096];
+    char *argv[4];
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_dylib_pair(dir, target, dylib_main_source(), NULL, exe,
+                     sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* The executable must record the dylib and an LC_RPATH. */
+    CHECK(macho_has_command(exe, 0x0cu));        /* LC_LOAD_DYLIB */
+    CHECK(macho_has_command(exe, 0x8000001cu));  /* LC_RPATH */
+
+    /* Run with the temp dir as cwd so out.txt lands there. */
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        cwd[0] = '\0';
+    }
+    if (chdir(dir) != 0) {
+        fprintf(stderr, "  FAIL cannot chdir to the temp dir\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "add=42");
+    CHECK_CONTAINS(out, "tag=helper-v1");
+    CHECK_CONTAINS(out, "file=masa-danroot");
+    CHECK_CONTAINS(out, "ostype=Darwin rc=0");
+    CHECK_CONTAINS(out, "dl=140/helper-v1");
+
+    if (cwd[0] != '\0') {
+        (void)chdir(cwd);
+    }
+
+    /* The program wrote out.txt; confirm its contents. */
+    {
+        char path[4096];
+        char buf[64];
+        FILE *fp;
+        size_t n;
+
+        snprintf(path, sizeof(path), "%s/out.txt", dir);
+        fp = fopen(path, "rb");
+        CHECK(fp != NULL);
+        if (fp != NULL) {
+            n = fread(buf, 1, sizeof(buf) - 1, fp);
+            fclose(fp);
+            buf[n] = '\0';
+            CHECK(strcmp(buf, "masa-danroot\n") == 0);
+        }
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * A weak dependency that is missing must not fail the load: the loader
+ * skips it and a weak import resolves to NULL, so the program sees the
+ * symbol as absent.
+ */
+static void test_run_weak_dylib_optional(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_dylib_weak_XXXXXX";
+    char exe[4096];
+    char from[4200];
+    char to[4200];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *weak_main =
+        "#include <stdio.h>\n"
+        "extern int helper_add(int x) __attribute__((weak_import));\n"
+        "int main(void) {\n"
+        "    if (helper_add != 0) { printf(\"present=%d\\n\", helper_add(2)); }\n"
+        "    else { printf(\"absent\\n\"); }\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    /* Link -weak_library so the dependency is recorded as weak. */
+    {
+        char weaklib[4300];
+
+        snprintf(weaklib, sizeof(weaklib), "-Wl,-weak_library,%s/libhelper.dylib",
+                 dir);
+        if (build_dylib_pair(dir, target, weak_main, weaklib, exe,
+                             sizeof(exe)) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            reset_masa_env();
+            return;
+        }
+    }
+
+    /* Present: the weak import resolves and calls through. */
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "present=42");
+
+    /* Absent: hiding the dylib must still run, with the import as NULL. */
+    snprintf(from, sizeof(from), "%s/libhelper.dylib", dir);
+    snprintf(to, sizeof(to), "%s/hidden.dylib", dir);
+    if (rename(from, to) != 0) {
+        fprintf(stderr, "  FAIL cannot hide the dylib\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "absent");
+
+    (void)rename(to, from);
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * A missing (non-weak) dylib must fail the load with a clear message and
+ * leave no leaks: the loader unwinds every mapping and allocation.
+ */
+static void test_run_missing_dylib_reports_error(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_dylib_miss_XXXXXX";
+    char exe[4096];
+    char from[4096];
+    char to[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_dylib_pair(dir, target, dylib_main_source(), NULL, exe,
+                     sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* Hide the dylib so the dependency cannot be resolved. */
+    snprintf(from, sizeof(from), "%s/libhelper.dylib", dir);
+    snprintf(to, sizeof(to), "%s/hidden.dylib", dir);
+    if (rename(from, to) != 0) {
+        fprintf(stderr, "  FAIL cannot hide the dylib\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "cannot find dependency");
+
+    /* Restore so remove_tree can clear everything. */
+    (void)rename(to, from);
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * A dylib referenced by @rpath must also be found on MASA_LIBRARY_PATH
+ * when it is not next to the executable.
+ */
+static void test_run_dylib_via_library_path(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_dylib_lp_XXXXXX";
+    char sub[4096];
+    char exe[4096];
+    char from[4200];
+    char to[4200];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    {
+        static const char *linked_only =
+            "#include <stdio.h>\n"
+            "extern int helper_add(int x);\n"
+            "int main(void) { printf(\"add=%d\\n\", helper_add(2));"
+            " return 0; }\n";
+
+        if (build_dylib_pair(dir, target, linked_only, NULL, exe,
+                             sizeof(exe)) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            reset_masa_env();
+            return;
+        }
+    }
+
+    /* Move the dylib into a directory reachable only via the env path. */
+    snprintf(sub, sizeof(sub), "%s/libs", dir);
+    if (mkdir(sub, 0700) != 0) {
+        fprintf(stderr, "  FAIL cannot create a subdirectory\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    snprintf(from, sizeof(from), "%s/libhelper.dylib", dir);
+    snprintf(to, sizeof(to), "%s/libhelper.dylib", sub);
+    if (rename(from, to) != 0) {
+        fprintf(stderr, "  FAIL cannot move the dylib\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    set_env("MASA_LIBRARY_PATH", sub);
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "add=42");
+
+    unsetenv("MASA_LIBRARY_PATH");
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+
+/* ------------------------------------------------------------------ */
 /* Milestone 6: `masa shell` and the host-services layer               */
 /* ------------------------------------------------------------------ */
 
@@ -4988,6 +5463,10 @@ int main(void)
     RUN(test_danroot_alias_executes_macho);
     RUN(test_run_honours_exit);
     RUN(test_run_classic_dyld_info_fixups);
+    RUN(test_run_loads_dylib);
+    RUN(test_run_missing_dylib_reports_error);
+    RUN(test_run_weak_dylib_optional);
+    RUN(test_run_dylib_via_library_path);
     RUN(test_run_rejects_cputype_mismatch);
     RUN(test_run_rejects_bad_input);
 

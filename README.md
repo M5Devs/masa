@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.1.0](https://img.shields.io/badge/version-v1.1.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.2.0](https://img.shields.io/badge/version-v1.2.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -24,9 +24,10 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
   (`masa sdk init-stub`), the linker is LLVM's `ld64.lld`, and the compiler is
   the `clang` you already have. Nothing from Apple is downloaded or required.
 - **It doesn't just build — it runs.** `masa danroot` executes a Mach-O
-  `MH_EXECUTE` binary directly on a POSIX host (Linux, Android/Termux),
-  in-process, with no virtual machine, no kernel module and no full Darwin
-  userland. Build and run in one place.
+  `MH_EXECUTE` binary — and the `MH_DYLIB` libraries it links against —
+  directly on a POSIX host (Linux, Android/Termux), in-process, with no
+  virtual machine, no kernel module and no full Darwin userland. Build and
+  run in one place.
 - **It speaks your build systems.** `masa xcode build` reads a checked-in
   `.xcodeproj`, `masa brew` lints and builds Homebrew formulas, and
   `masa exec` / `masa shell` run `make` and shell scripts with `cc`, `ld`,
@@ -46,6 +47,7 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 | Host OS | Linux, Windows, Android | Linux, macOS | macOS only |
 | Build Mach-O binaries | ✅ `masa cc`, `masa xcode` | — | ✅ |
 | Run Mach-O binaries | ✅ in-process (Danroot, POSIX hosts) | ✅ compatibility layer | ✅ |
+| Run Mach-O dylibs | ✅ in-process (Danroot) | ✅ compatibility layer | ✅ |
 | Needs a real Apple SDK | ❌ clean-room stub | ✅ macOS frameworks/SDK | ✅ |
 | Needs a Mac | ❌ | ❌ | ✅ |
 | Apple Developer Program ($99/yr) | ❌ | ❌ | ✅ to distribute |
@@ -98,24 +100,32 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 
 ## Status
 
-Milestone 11 (v1.1.0): the Masa Danroot loader. `masa run` (aliased as
-`masa danroot`) executes a Mach-O `MH_EXECUTE` binary built by `masa cc`
-directly on a POSIX host - a clean-room, in-process reimplementation of the
-`dyld` steps a self-contained executable needs (segment mapping, chained and
-classic dyld-info relocations, a `libSystem` shim, the `LC_MAIN` entry call) -
-so a cross-compiled Darwin program can be built and run in one place. This
-sits on the Milestone 10 distribution work (`masa pack` to `.ipa`/`.dmg`, the
-Homebrew single-string `system` fix), the Milestone 9 local independence
-(`masa doctor`, `make dist`, self-hosted CI, the Windows ConPTY backend), the
-Milestone 8 standalone GUI terminal (`masa-term`, an optional SDL2 + SDL2_ttf
-+ libvterm front end over a real PTY), the Milestone 7 Swift toolchain support
-and Android cross-compilation, the Milestone 6 interactive `masa shell` and
-portable host-services layer, the Milestone 5 Homebrew formula linter and
-builder (`masa brew`), the Milestone 4 Xcode `.xcodeproj` builder and
-`codesign` shim, the Milestone 3 full Mach-O executable linking, toolchain
-shims and `masa sdk`, and the Milestone 2 `argv[0]` dispatch and `masa exec`
-environment runner, which in turn rest on the Milestone 1 `cc` wrapper and
-`sys` shims.
+Milestone 12 (v1.2.0): the Masa Danroot loader grows dynamic library
+support. `masa run` (aliased as `masa danroot`) now loads `MH_DYLIB` images
+alongside the `MH_EXECUTE` main image: it follows `LC_LOAD_DYLIB`,
+`LC_LOAD_WEAK_DYLIB` and `LC_REEXPORT_DYLIB` references (resolving
+`@executable_path`, `@loader_path`, `@rpath` via `LC_RPATH`, absolute paths
+and the `MASA_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` search paths), indexes each
+image's exports (`LC_DYLD_EXPORTS_TRIE`, with an `LC_SYMTAB` fallback) and
+resolves cross-image binds, so a program can call into a `masa cc -dynamiclib`
+library. `/usr/lib/libSystem.B.dylib` is never read from disk - the built-in
+`libSystem` shim satisfies it - and the shim itself gains POSIX file, string
+and process calls plus `sysctlbyname`, `uname` and `dlopen`/`dlsym`/
+`dlclose`/`dlerror`. This sits on the Milestone 11 loader core (`masa run` /
+`masa danroot` executing a Mach-O `MH_EXECUTE` binary built by `masa cc` -
+a clean-room, in-process reimplementation of the `dyld` steps a
+self-contained executable needs), the Milestone 10 distribution work
+(`masa pack` to `.ipa`/`.dmg`, the Homebrew single-string `system` fix), the
+Milestone 9 local independence (`masa doctor`, `make dist`, self-hosted CI,
+the Windows ConPTY backend), the Milestone 8 standalone GUI terminal
+(`masa-term`, an optional SDL2 + SDL2_ttf + libvterm front end over a real
+PTY), the Milestone 7 Swift toolchain support and Android cross-compilation,
+the Milestone 6 interactive `masa shell` and portable host-services layer,
+the Milestone 5 Homebrew formula linter and builder (`masa brew`), the
+Milestone 4 Xcode `.xcodeproj` builder and `codesign` shim, the Milestone 3
+full Mach-O executable linking, toolchain shims and `masa sdk`, and the
+Milestone 2 `argv[0]` dispatch and `masa exec` environment runner, which in
+turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
 
 ## Requirements
 
@@ -225,6 +235,12 @@ MASA_TARGET=x86_64-apple-darwin masa cc -c hello.c -o hello.o
 # Link a real Mach-O executable against the stub SDK.
 masa sdk init-stub /opt/masa/sdk
 MASA_SDK_PATH=/opt/masa/sdk masa cc hello.c -o hello
+
+# Build a Mach-O dynamic library and link a program against it.
+MASA_SDK_PATH=/opt/masa/sdk masa cc -dynamiclib helper.c -o libhelper.dylib \
+    -install_name @rpath/libhelper.dylib
+MASA_SDK_PATH=/opt/masa/sdk masa cc main.c -L. -lhelper \
+    -Wl,-rpath,@executable_path -o app
 ```
 
 ### `masa swift`
@@ -409,8 +425,11 @@ rejected by both modes.
 `usr/lib/libSystem.tbd`, which is what a link needs.
 
 `masa sdk init-stub <dir>` writes a clean-room stub SDK: TAPI v4 `.tbd` files
-for `libSystem` and `crt1.o` plus a few standard headers. It contains no Apple
-code, and it is enough for `ld64.lld` to produce real `MH_EXECUTE` images.
+for `libSystem`, `libgcc_s.1` and the `crt1.o` / `dylib1.o` link stubs, plus
+the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `unistd.h`,
+`fcntl.h`, `dlfcn.h`, `sys/stat.h`, `sys/utsname.h`, `sys/sysctl.h`). It
+contains no Apple code, and it is enough for `ld64.lld` to produce real
+`MH_EXECUTE` and `MH_DYLIB` images.
 
 ```sh
 masa sdk init-stub /opt/masa/sdk
@@ -568,17 +587,32 @@ masa run ./hello alpha beta
 ```
 
 This is the **Masa Danroot** loader, a clean-room (GPLv3) reimplementation of
-the parts of `dyld` a self-contained executable needs:
+the parts of `dyld` a self-contained program needs:
 
 - it reads the `LC_SEGMENT_64` load commands and maps each segment with
   `mmap()`, sliding them to whatever base the kernel returns;
+- it follows the image's dynamic library dependencies - `LC_LOAD_DYLIB`,
+  `LC_LOAD_WEAK_DYLIB` and `LC_REEXPORT_DYLIB` - loading each `MH_DYLIB` the
+  same way (and recursively, so a library's own dependencies are loaded too).
+  A weak dependency that is missing is skipped; a required one that is
+  missing is a clear error. `/usr/lib/libSystem.B.dylib` and
+  `/usr/lib/libSystem.dylib` are never read from disk - the built-in shim
+  satisfies them;
+- it resolves dependency paths the way dyld does: `@executable_path/`,
+  `@loader_path/` and `@rpath/` (searched against the image's `LC_RPATH`
+  entries), absolute paths, and bare names on `MASA_LIBRARY_PATH`,
+  `DYLD_LIBRARY_PATH` and the loading image's own directory;
+- it indexes each image's exports - the `LC_DYLD_EXPORTS_TRIE` trie, with an
+  `LC_SYMTAB` fallback - so a bind in one image can resolve to a definition
+  in another;
 - it applies the image's relocations, whichever format the linker emitted:
   `LC_DYLD_CHAINED_FIXUPS` (`ptr_fmt = 2`, `DYLD_CHAINED_PTR_64`) or the
   classic `LC_DYLD_INFO_ONLY` rebase/bind opcodes (older `ld64.lld`, such as
   the clang-18 on Ubuntu 24.04), rewriting rebases to the real load address
   and resolving binds;
 - it resolves the image's imports against a small clean-room `libSystem`
-  shim (see the symbol list below);
+  shim (see the symbol list below) and against the exports of every loaded
+  image;
 - it calls the `LC_MAIN` entry point with `(argc, argv, envp, apple)` and
   returns the value it produces as the process exit status.
 
@@ -592,12 +626,32 @@ the other architecture is rejected cleanly:
 masa: run: architecture mismatch: './hello' is arm64, host is x86_64
 ```
 
-The shim covers the core C symbols a program built against the stub SDK can
-reference: `printf`, `puts`, `putchar`, `fprintf`, `malloc`, `calloc`,
-`realloc`, `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `memcpy`,
-`memset`, `memmove`, `atoi`, `getenv`, `write`, `read`, `open`, `close`,
-`abort` and `exit`. An `exit()` call unwinds back to the loader (so cleanup
-still runs) and its status becomes the process exit code.
+**Dynamic libraries.** Build a library with `masa cc -dynamiclib` and link a
+program against it as usual; `masa run` loads both:
+
+```sh
+masa cc -dynamiclib helper.c -o libhelper.dylib -install_name @rpath/libhelper.dylib
+masa cc main.c -L. -lhelper -Wl,-rpath,@executable_path -o app
+masa run ./app
+```
+
+The shim covers the C symbols a program built against the stub SDK can
+reference. Standard I/O: `printf`, `fprintf`, `sprintf`, `snprintf`,
+`vsnprintf`, `sscanf`, `puts`, `putchar`, `fopen`, `fclose`, `fread`,
+`fwrite`, `fgets`, `fputs`, `fflush`, `fseek`, `ftell`, `feof`, `ferror`.
+File descriptors: `read`, `write`, `open`, `close`, `lseek`, `access`,
+`unlink`, `mkdir`, `rmdir`, `getcwd`, `chdir`. Strings and memory: `malloc`,
+`calloc`, `realloc`, `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`,
+`strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strdup`,
+`strndup`, `strerror`, `memcpy`, `memset`, `memmove`, `atoi`. Process and
+environment: `getenv`, `setenv`, `unsetenv`, `getpid`, `getuid`, `isatty`,
+`usleep`, `sleep`, `abort`, `exit`. Darwin system information: `uname`
+(reporting `Darwin`) and `sysctlbyname` (`kern.ostype`, `kern.osrelease`,
+`hw.machine`, `hw.ncpu`, `hw.memsize`, ...). Dynamic linker: `dlopen`,
+`dlsym`, `dlclose`, `dlerror` (a `dlopen` loads a library through the same
+resolver). The standard streams are exposed as data symbols (`__stdoutp`
+and friends). An `exit()` call unwinds back to the loader (so cleanup still
+runs) and its status becomes the process exit code.
 
 Errors are reported clearly and never crash:
 
@@ -605,6 +659,7 @@ Errors are reported clearly and never crash:
 masa: run: cannot open './nope': No such file or directory
 masa: run: './notmacho' is not a 64-bit Mach-O image
 masa: run: './app' has no LC_MAIN entry point
+masa: run: './app': cannot find dependency '@rpath/libhelper.dylib'
 ```
 
 `masa run` is available on POSIX hosts; on Windows the subcommand reports
@@ -678,6 +733,7 @@ on the build host.
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
 | `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
+| `MASA_LIBRARY_PATH` | Extra colon-separated dirs `masa run` searches for dylibs |
 | `MASA_FONT`     | TrueType font `masa-term` uses (overrides discovery)   |
 | `MASA_BIN`      | `masa` executable `masa-term` runs on the PTY          |
 | `TMPDIR`        | Preferred root for temporary directories and Cellars   |
@@ -696,7 +752,8 @@ src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
 src/brew.c             Homebrew formula linter and builder
 src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
-src/danroot.c          Masa Danroot: the Mach-O loader behind `masa run`
+src/danroot.c          Masa Danroot: the Mach-O loader (executables and
+                       dylibs) behind `masa run`
 src/exec.c             init-shims, exec, shell and the shim environment
 src/doctor.c           masa doctor: local cross-build readiness report
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)

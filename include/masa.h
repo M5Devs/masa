@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.1.0"
+#define MASA_VERSION "1.2.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -61,6 +61,9 @@ extern "C" {
 #define MASA_SHIM_TARGET_ENV "MASA_SHIM_TARGET"
 /* When set to 1, `masa shell` leaves the caller's PS1 untouched. */
 #define MASA_KEEP_PS1_ENV "MASA_KEEP_PS1"
+/* Extra directories the Danroot loader searches for `@rpath`/bare dylib
+ * names, ahead of DYLD_LIBRARY_PATH.  Colon-separated. */
+#define MASA_LIBRARY_PATH_ENV "MASA_LIBRARY_PATH"
 
 /* Exit status returned when the wrapper cannot spawn a tool at all. */
 #define MASA_EXIT_SPAWN_ERROR 127

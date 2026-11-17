@@ -75,10 +75,18 @@ static const char *libsystem_tbd(void)
         "compatibility-version: 1.0\n"
         "exports:\n"
         "  - targets:         [ arm64-macos, x86_64-macos ]\n"
-        "    symbols:         [ _printf, _puts, _putchar, _malloc, _calloc,"
-        " _realloc, _free, _strlen, _strcmp, _strncmp, _strcpy, _memcpy,"
-        " _memset, _memmove, _atoi, _getenv, _exit, _fprintf, _write, _read,"
-        " _open, _close, dyld_stub_binder ]\n"
+        "    symbols:         [ _printf, _puts, _putchar, _fprintf, _fopen,"
+        " _fclose, _fread, _fwrite, _fgets, _fputs, _fflush, _fseek, _ftell,"
+        " _feof, _ferror, _snprintf, _vsnprintf, _sprintf, _sscanf,"
+        " _write, _read, _open, _close, _lseek, _access, _unlink, _mkdir,"
+        " _rmdir, _getcwd, _chdir,"
+        " _malloc, _calloc, _realloc, _free, _strlen, _strcmp, _strncmp,"
+        " _strcpy, _strncpy, _strcat, _strncat, _strchr, _strrchr, _strstr,"
+        " _strdup, _strndup, _strerror, _memcpy, _memset, _memmove, _atoi,"
+        " _getenv, _setenv, _unsetenv, _getpid, _getuid, _isatty, _usleep,"
+        " _sleep, _abort, _exit, _uname, _sysctlbyname,"
+        " _dlopen, _dlsym, _dlclose, _dlerror,"
+        " ___stdinp, ___stdoutp, ___stderrp, dyld_stub_binder ]\n"
         "...\n";
 }
 
@@ -112,6 +120,26 @@ static const char *crt1_tbd(void)
         "...\n";
 }
 
+/*
+ * ld64.lld links a -dynamiclib against -ldylib1.o; the stub only has to
+ * name the symbol so the link succeeds, because the Danroot loader does
+ * not call __dyld_private itself.
+ */
+static const char *dylib1_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/usr/lib/dylib1.o'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ __dyld_private ]\n"
+        "...\n";
+}
+
 static const char *stdlib_h(void)
 {
     return
@@ -133,6 +161,10 @@ static const char *stdlib_h(void)
         "void free(void *ptr);\n"
         "int atoi(const char *s);\n"
         "char *getenv(const char *name);\n"
+        "int setenv(const char *name, const char *value, int overwrite);\n"
+        "int unsetenv(const char *name);\n"
+        "int getpid(void);\n"
+        "unsigned int getuid(void);\n"
         "\n"
         "#endif /* MASA_STUB_STDLIB_H */\n";
 }
@@ -143,6 +175,10 @@ static const char *string_h(void)
         "#ifndef MASA_STUB_STRING_H\n"
         "#define MASA_STUB_STRING_H\n"
         "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
         "typedef unsigned long size_t;\n"
         "\n"
         "void *memcpy(void *dst, const void *src, size_t n);\n"
@@ -152,6 +188,15 @@ static const char *string_h(void)
         "int strcmp(const char *a, const char *b);\n"
         "int strncmp(const char *a, const char *b, size_t n);\n"
         "char *strcpy(char *dst, const char *src);\n"
+        "char *strncpy(char *dst, const char *src, size_t n);\n"
+        "char *strcat(char *dst, const char *src);\n"
+        "char *strncat(char *dst, const char *src, size_t n);\n"
+        "char *strchr(const char *s, int c);\n"
+        "char *strrchr(const char *s, int c);\n"
+        "char *strstr(const char *haystack, const char *needle);\n"
+        "char *strdup(const char *s);\n"
+        "char *strndup(const char *s, size_t n);\n"
+        "char *strerror(int errnum);\n"
         "\n"
         "#endif /* MASA_STUB_STRING_H */\n";
 }
@@ -162,14 +207,180 @@ static const char *stdio_h(void)
         "#ifndef MASA_STUB_STDIO_H\n"
         "#define MASA_STUB_STDIO_H\n"
         "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
         "typedef unsigned long size_t;\n"
+        "typedef struct __masa_FILE FILE;\n"
+        "\n"
+        "#define EOF (-1)\n"
+        "#define SEEK_SET 0\n"
+        "#define SEEK_CUR 1\n"
+        "#define SEEK_END 2\n"
+        "\n"
+        "extern FILE *stdin;\n"
+        "extern FILE *stdout;\n"
+        "extern FILE *stderr;\n"
         "\n"
         "int printf(const char *format, ...);\n"
-        "int fprintf(void *stream, const char *format, ...);\n"
+        "int fprintf(FILE *stream, const char *format, ...);\n"
+        "int sprintf(char *buf, const char *format, ...);\n"
+        "int snprintf(char *buf, size_t n, const char *format, ...);\n"
+        "int sscanf(const char *s, const char *format, ...);\n"
         "int puts(const char *s);\n"
         "int putchar(int c);\n"
+        "FILE *fopen(const char *path, const char *mode);\n"
+        "int fclose(FILE *stream);\n"
+        "size_t fread(void *ptr, size_t size, size_t count, FILE *stream);\n"
+        "size_t fwrite(const void *ptr, size_t size, size_t count,"
+        " FILE *stream);\n"
+        "char *fgets(char *s, int size, FILE *stream);\n"
+        "int fputs(const char *s, FILE *stream);\n"
+        "int fflush(FILE *stream);\n"
+        "int fseek(FILE *stream, long offset, int whence);\n"
+        "long ftell(FILE *stream);\n"
+        "int feof(FILE *stream);\n"
+        "int ferror(FILE *stream);\n"
         "\n"
         "#endif /* MASA_STUB_STDIO_H */\n";
+}
+
+static const char *unistd_h(void)
+{
+    return
+        "#ifndef MASA_STUB_UNISTD_H\n"
+        "#define MASA_STUB_UNISTD_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "typedef unsigned long size_t;\n"
+        "typedef long ssize_t;\n"
+        "typedef long off_t;\n"
+        "\n"
+        "int close(int fd);\n"
+        "ssize_t read(int fd, void *buf, size_t n);\n"
+        "ssize_t write(int fd, const void *buf, size_t n);\n"
+        "off_t lseek(int fd, off_t offset, int whence);\n"
+        "int access(const char *path, int mode);\n"
+        "int unlink(const char *path);\n"
+        "int rmdir(const char *path);\n"
+        "char *getcwd(char *buf, size_t size);\n"
+        "int chdir(const char *path);\n"
+        "int isatty(int fd);\n"
+        "int usleep(unsigned int usec);\n"
+        "unsigned int sleep(unsigned int seconds);\n"
+        "\n"
+        "#endif /* MASA_STUB_UNISTD_H */\n";
+}
+
+static const char *fcntl_h(void)
+{
+    return
+        "#ifndef MASA_STUB_FCNTL_H\n"
+        "#define MASA_STUB_FCNTL_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "#define O_RDONLY 0\n"
+        "#define O_WRONLY 1\n"
+        "#define O_RDWR   2\n"
+        "#define O_CREAT  0x0200\n"
+        "#define O_TRUNC  0x0400\n"
+        "#define O_APPEND 0x0008\n"
+        "\n"
+        "int open(const char *path, int flags, ...);\n"
+        "\n"
+        "#endif /* MASA_STUB_FCNTL_H */\n";
+}
+
+static const char *sys_stat_h(void)
+{
+    return
+        "#ifndef MASA_STUB_SYS_STAT_H\n"
+        "#define MASA_STUB_SYS_STAT_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "#define S_IRWXU 0700\n"
+        "#define S_IRUSR 0400\n"
+        "#define S_IWUSR 0200\n"
+        "\n"
+        "int mkdir(const char *path, int mode);\n"
+        "\n"
+        "#endif /* MASA_STUB_SYS_STAT_H */\n";
+}
+
+static const char *sys_utsname_h(void)
+{
+    return
+        "#ifndef MASA_STUB_SYS_UTSNAME_H\n"
+        "#define MASA_STUB_SYS_UTSNAME_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "struct utsname {\n"
+        "    char sysname[256];\n"
+        "    char nodename[256];\n"
+        "    char release[256];\n"
+        "    char version[256];\n"
+        "    char machine[256];\n"
+        "};\n"
+        "\n"
+        "int uname(struct utsname *buf);\n"
+        "\n"
+        "#endif /* MASA_STUB_SYS_UTSNAME_H */\n";
+}
+
+static const char *sys_sysctl_h(void)
+{
+    return
+        "#ifndef MASA_STUB_SYS_SYSCTL_H\n"
+        "#define MASA_STUB_SYS_SYSCTL_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "typedef unsigned long size_t;\n"
+        "\n"
+        "int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,\n"
+        "                 void *newp, size_t newlen);\n"
+        "\n"
+        "#endif /* MASA_STUB_SYS_SYSCTL_H */\n";
+}
+
+static const char *dlfcn_h(void)
+{
+    return
+        "#ifndef MASA_STUB_DLFCN_H\n"
+        "#define MASA_STUB_DLFCN_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "#define RTLD_LAZY   0x1\n"
+        "#define RTLD_NOW    0x2\n"
+        "#define RTLD_LOCAL  0x4\n"
+        "#define RTLD_GLOBAL 0x8\n"
+        "#define RTLD_DEFAULT ((void *)0)\n"
+        "#define RTLD_NEXT    ((void *)-1)\n"
+        "\n"
+        "void *dlopen(const char *path, int mode);\n"
+        "void *dlsym(void *handle, const char *symbol);\n"
+        "int dlclose(void *handle);\n"
+        "char *dlerror(void);\n"
+        "\n"
+        "#endif /* MASA_STUB_DLFCN_H */\n";
 }
 
 /* ------------------------------------------------------------------ */
@@ -185,10 +396,17 @@ static const struct stub_file stub_files[] = {
     { "usr/lib/libSystem.tbd", libsystem_tbd },
     { "usr/lib/libSystem.B.tbd", libsystem_tbd },
     { "usr/lib/libgcc_s.1.tbd", libgcc_s_tbd },
+    { "usr/lib/dylib1.o", dylib1_tbd },
     { "usr/lib/crt1.o", crt1_tbd },
     { "usr/include/stdlib.h", stdlib_h },
     { "usr/include/string.h", string_h },
-    { "usr/include/stdio.h", stdio_h }
+    { "usr/include/stdio.h", stdio_h },
+    { "usr/include/unistd.h", unistd_h },
+    { "usr/include/fcntl.h", fcntl_h },
+    { "usr/include/dlfcn.h", dlfcn_h },
+    { "usr/include/sys/stat.h", sys_stat_h },
+    { "usr/include/sys/utsname.h", sys_utsname_h },
+    { "usr/include/sys/sysctl.h", sys_sysctl_h }
 };
 
 static int sdk_init_stub(const char *dir)
