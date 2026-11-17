@@ -4298,16 +4298,29 @@ static void test_run_loads_dylib(void)
  * skips it and a weak import resolves to NULL, so the program sees the
  * symbol as absent.
  */
-static void test_run_weak_dylib_optional(void)
+/*
+ * Shared body for the weak-dependency tests.  extra_args (may be NULL) is
+ * appended to the executable's link line, which lets a caller force a
+ * particular relocation encoding (e.g. -Wl,-no_fixup_chains for the classic
+ * LC_DYLD_INFO_ONLY opcodes).  When a weak dependency is missing the program
+ * must still run with the import bound to NULL.
+ */
+static void weak_dylib_scenario(const char *extra_args)
 {
     const char *target = host_apple_target();
     char dir[] = "/tmp/masa_dylib_weak_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char libdir[4096];
+    char weaklib[4300];
     char exe[4096];
     char from[4200];
     char to[4200];
     char out[4096];
     char err[4096];
-    char *argv[4];
+    char *argv[16];
+    int n = 0;
+    int rc;
     static const char *weak_main =
         "#include <stdio.h>\n"
         "extern int helper_add(int x) __attribute__((weak_import));\n"
@@ -4316,7 +4329,6 @@ static void test_run_weak_dylib_optional(void)
         "    else { printf(\"absent\\n\"); }\n"
         "    return 0;\n"
         "}\n";
-    int rc;
 
     if (target == NULL || !tool_available("clang")) {
         printf("  SKIP needs clang and a supported host\n");
@@ -4329,19 +4341,48 @@ static void test_run_weak_dylib_optional(void)
         return;
     }
 
-    /* Link -weak_library so the dependency is recorded as weak. */
-    {
-        char weaklib[4300];
+    /* Build the weak library, then link the program against it weakly. */
+    if (build_dylib(dir, target, dylib_helper_source(), "helper") != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/main.c", dir);
+    snprintf(libdir, sizeof(libdir), "-L%s", dir);
+    snprintf(weaklib, sizeof(weaklib), "-Wl,-weak_library,%s/libhelper.dylib",
+             dir);
+    snprintf(exe, sizeof(exe), "%s/app", dir);
 
-        snprintf(weaklib, sizeof(weaklib), "-Wl,-weak_library,%s/libhelper.dylib",
-                 dir);
-        if (build_dylib_pair(dir, target, weak_main, weaklib, exe,
-                             sizeof(exe)) != 0) {
-            g_failed++;
-            remove_tree(dir);
-            reset_masa_env();
-            return;
-        }
+    reset_masa_env();
+    if (write_file(src, weak_main) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = exe;
+    argv[n++] = libdir;
+    argv[n++] = weaklib;
+    argv[n++] = "-Wl,-rpath,@executable_path";
+    if (extra_args != NULL) {
+        argv[n++] = (char *)extra_args;
+    }
+    argv[n] = NULL;
+    if (run_masa(argv, out, sizeof(out), err, sizeof(err)) != 0) {
+        fprintf(stderr, "  exe cc stderr: %s\n", err);
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
     }
 
     /* Present: the weak import resolves and calls through. */
@@ -4373,6 +4414,22 @@ static void test_run_weak_dylib_optional(void)
     (void)rename(to, from);
     remove_tree(dir);
     reset_masa_env();
+}
+
+static void test_run_weak_dylib_optional(void)
+{
+    weak_dylib_scenario(NULL);
+}
+
+/*
+ * Same as above but linked with -no_fixup_chains, so the weak import lives
+ * in the classic LC_DYLD_INFO_ONLY bind opcodes.  clang-18 (Ubuntu 24.04)
+ * emits that encoding by default; clang-19 prefers LC_DYLD_CHAINED_FIXUPS,
+ * so forcing it here keeps both paths covered on every toolchain.
+ */
+static void test_run_weak_dylib_classic_dyld_info(void)
+{
+    weak_dylib_scenario("-Wl,-no_fixup_chains");
 }
 
 /*
@@ -5466,6 +5523,7 @@ int main(void)
     RUN(test_run_loads_dylib);
     RUN(test_run_missing_dylib_reports_error);
     RUN(test_run_weak_dylib_optional);
+    RUN(test_run_weak_dylib_classic_dyld_info);
     RUN(test_run_dylib_via_library_path);
     RUN(test_run_rejects_cputype_mismatch);
     RUN(test_run_rejects_bad_input);

@@ -142,6 +142,9 @@ extern char **environ;
 #define DR_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xc0u
 #define DR_BIND_OPCODE_THREADED      0xd0u
 
+/* BIND_SYMBOL_FLAGS_* (the immediate of SET_SYMBOL_TRAILING_FLAGS_IMM). */
+#define DR_BIND_SYMBOL_FLAGS_WEAK_IMPORT 0x1u
+
 /* BIND_TYPE_* (the low nibble of SET_TYPE_IMM for binds). */
 #define DR_BIND_TYPE_POINTER        1u
 #define DR_BIND_TYPE_TEXT_ABSOLUTE32 2u
@@ -1641,11 +1644,17 @@ static int dr_apply_one_rebase(const struct dr_image *img,
     return 0;
 }
 
-/* Bind one pointer slot to the resolved symbol. */
+/* 1 when ordinal names a weak (LC_LOAD_WEAK_DYLIB) dependency. */
+static int dr_ordinal_weak(const struct dr_image *img, int ordinal)
+{
+    return ordinal >= 1 && ordinal <= img->dylib_count &&
+           img->dylibs[ordinal - 1].weak;
+}
+
 static int dr_apply_one_bind(struct dr_loader *ld, const struct dr_image *img,
                              unsigned char *loaded, int seg_index,
                              uint64_t seg_offset, const char *name,
-                             int bind_type, int64_t addend,
+                             int bind_type, int64_t addend, int weak,
                              char *err, size_t errcap)
 {
     int ok;
@@ -1662,6 +1671,11 @@ static int dr_apply_one_bind(struct dr_loader *ld, const struct dr_image *img,
     }
     target = dr_resolve_symbol(ld, name);
     if (target == NULL) {
+        if (weak) {
+            /* A weak import that is absent binds to NULL plus the addend. */
+            *(uint64_t *)(uintptr_t)addr = (uint64_t)addend;
+            return 0;
+        }
         snprintf(err, errcap, "unresolved symbol '%s'", name);
         return -1;
     }
@@ -1779,6 +1793,8 @@ static int dr_apply_binds(struct dr_loader *ld, const struct dr_module *m,
     int seg_index = 0;
     int bind_type = DR_BIND_TYPE_POINTER;
     int64_t addend = 0;
+    int ordinal = 0;
+    int weak = 0;
     char symbol[512];
 
     if (size == 0) {
@@ -1807,11 +1823,13 @@ static int dr_apply_binds(struct dr_loader *ld, const struct dr_module *m,
             }
             return 0;
         case DR_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
+            ordinal = imm;
             break;
         case DR_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
-            (void)dr_uleb128(&p, end);
+            ordinal = (int)dr_uleb128(&p, end);
             break;
         case DR_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
+            ordinal = 0; /* self/flat/weak-lookup/main: no ordinal */
             break;
         case DR_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM: {
             size_t n = 0;
@@ -1825,6 +1843,7 @@ static int dr_apply_binds(struct dr_loader *ld, const struct dr_module *m,
             if (p < end) {
                 p++; /* skip the trailing NUL */
             }
+            weak = (imm & DR_BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
             break;
         }
         case DR_BIND_OPCODE_SET_TYPE_IMM:
@@ -1842,17 +1861,23 @@ static int dr_apply_binds(struct dr_loader *ld, const struct dr_module *m,
             break;
         case DR_BIND_OPCODE_DO_BIND:
             rc = dr_apply_one_bind(ld, img, m->loaded, seg_index, seg_offset,
-                                   symbol, bind_type, addend, err, errcap);
+                                   symbol, bind_type, addend,
+                                   weak || dr_ordinal_weak(img, ordinal),
+                                   err, errcap);
             seg_offset += sizeof(void *);
             break;
         case DR_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
             rc = dr_apply_one_bind(ld, img, m->loaded, seg_index, seg_offset,
-                                   symbol, bind_type, addend, err, errcap);
+                                   symbol, bind_type, addend,
+                                   weak || dr_ordinal_weak(img, ordinal),
+                                   err, errcap);
             seg_offset += dr_uleb128(&p, end) + sizeof(void *);
             break;
         case DR_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
             rc = dr_apply_one_bind(ld, img, m->loaded, seg_index, seg_offset,
-                                   symbol, bind_type, addend, err, errcap);
+                                   symbol, bind_type, addend,
+                                   weak || dr_ordinal_weak(img, ordinal),
+                                   err, errcap);
             seg_offset += (uint64_t)imm * sizeof(void *) + sizeof(void *);
             break;
         case DR_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
@@ -1862,7 +1887,9 @@ static int dr_apply_binds(struct dr_loader *ld, const struct dr_module *m,
                 for (i = 0; i < count; i++) {
                     rc = dr_apply_one_bind(ld, img, m->loaded, seg_index,
                                            seg_offset, symbol, bind_type,
-                                           addend, err, errcap);
+                                           addend,
+                                           weak || dr_ordinal_weak(img, ordinal),
+                                           err, errcap);
                     if (rc != 0) {
                         break;
                     }
