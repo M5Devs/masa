@@ -1439,7 +1439,7 @@ static void test_sdk_init_stub(void)
     char dir[] = "/tmp/masa_sdk_XXXXXX";
     char path[4096];
     FILE *fp;
-    char buf[512];
+    char buf[2048];
     size_t got;
     int rc;
 
@@ -1469,6 +1469,45 @@ static void test_sdk_init_stub(void)
     CHECK(file_exists(path));
     snprintf(path, sizeof(path), "%s/usr/include/stdio.h", dir);
     CHECK(file_exists(path));
+    /* Milestone 14: the Objective-C runtime and framework stubs. */
+    snprintf(path, sizeof(path), "%s/usr/lib/libobjc.A.tbd", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/objc/objc.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/objc/runtime.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path), "%s/usr/include/objc/message.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path),
+             "%s/System/Library/Frameworks/CoreFoundation.framework"
+             "/CoreFoundation.tbd", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path),
+             "%s/System/Library/Frameworks/CoreFoundation.framework"
+             "/Headers/CoreFoundation.h", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path),
+             "%s/System/Library/Frameworks/Foundation.framework"
+             "/Foundation.tbd", dir);
+    CHECK(file_exists(path));
+    snprintf(path, sizeof(path),
+             "%s/System/Library/Frameworks/Foundation.framework"
+             "/Headers/Foundation.h", dir);
+    CHECK(file_exists(path));
+
+    /* The libSystem stub exports the stack-protector symbols arm64 needs. */
+    snprintf(path, sizeof(path), "%s/usr/lib/libSystem.tbd", dir);
+    fp = fopen(path, "r");
+    if (fp != NULL) {
+        got = fread(buf, 1, sizeof(buf) - 1, fp);
+        fclose(fp);
+        buf[got] = '\0';
+        CHECK_CONTAINS(buf, "___stack_chk_fail");
+        CHECK_CONTAINS(buf, "___stack_chk_guard");
+    } else {
+        fprintf(stderr, "  FAIL cannot read %s\n", path);
+        g_failed++;
+    }
 
     /* The .tbd must be a TAPI v4 YAML document. */
     snprintf(path, sizeof(path), "%s/usr/lib/libSystem.tbd", dir);
@@ -5846,6 +5885,267 @@ static void test_danroot_root_error_paths(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 14: stack protector, CoreFoundation, Objective-C          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Compile and link source into a Mach-O executable that references the
+ * named framework.  The stub SDK carries the framework's .tbd and headers,
+ * so clang finds both through the -isysroot the wrapper injects.
+ */
+static int build_macho_framework(const char *dir, const char *target,
+                                 const char *name, const char *source,
+                                 const char *framework,
+                                 char *exe_out, size_t exe_cap)
+{
+    char sdk[4096];
+    char src[4096];
+    char *argv[10];
+    char out[1024];
+    char err[4096];
+    int n = 0;
+    int rc;
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/%s.c", dir, name);
+    snprintf(exe_out, exe_cap, "%s/%s", dir, name);
+
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        return -1;
+    }
+    if (write_file(src, source) != 0) {
+        fprintf(stderr, "  FAIL cannot write %s\n", src);
+        g_failed++;
+        return -1;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = exe_out;
+    argv[n++] = "-framework";
+    argv[n++] = (char *)framework;
+    argv[n] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  cc stderr (%s): %s\n", target, err);
+    }
+    return rc;
+}
+
+/*
+ * arm64 clang enables the stack protector by default, so a function with a
+ * stack buffer references __stack_chk_guard and __stack_chk_fail.  Those
+ * must resolve against the stub libSystem and link into a real MH_EXECUTE.
+ */
+static void test_danroot_arm64_stack_protector(void)
+{
+    char dir[] = "/tmp/masa_sp_XXXXXX";
+    char exe[4096];
+    unsigned char magic[4];
+    unsigned char filetype[4];
+    static const unsigned char macho64_le[4] = {0xCF, 0xFA, 0xED, 0xFE};
+    static const unsigned char mh_execute[4] = {0x02, 0x00, 0x00, 0x00};
+    static const char *source =
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    char buf[64];\n"
+        "    buf[0] = 'o'; buf[1] = 'k'; buf[2] = '\\0';\n"
+        "    printf(\"%s\\n\", buf);\n"
+        "    return 0;\n"
+        "}\n";
+
+    if (!tool_available("clang")) {
+        printf("  SKIP clang is not installed\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_src(dir, "arm64-apple-darwin", "sp", source, exe,
+                        sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    CHECK(read_macho_header(exe, magic, filetype) == 0);
+    CHECK(memcmp(magic, macho64_le, sizeof(magic)) == 0);
+    CHECK(memcmp(filetype, mh_execute, sizeof(filetype)) == 0);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * CoreFoundation: a Mach-O linked with -framework CoreFoundation creates a
+ * CFString and a CFArray, shows the string, reads it back and counts the
+ * array, all through the clean-room shim.  One object is released, the
+ * rest are left for the loader's reset, and the run must stay leak-free.
+ */
+static void test_danroot_corefoundation(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_cf_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *source =
+        "#include <CoreFoundation/CoreFoundation.h>\n"
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    CFStringRef a = CFStringCreateWithCString(\n"
+        "        kCFAllocatorDefault, \"alpha\", kCFStringEncodingUTF8);\n"
+        "    CFStringRef b = CFStringCreateWithCString(\n"
+        "        kCFAllocatorDefault, \"beta\", kCFStringEncodingUTF8);\n"
+        "    const void *items[2];\n"
+        "    CFArrayRef arr;\n"
+        "    char buf[64];\n"
+        "    CFShow(a);\n"
+        "    printf(\"len=%ld\\n\", (long)CFStringGetLength(a));\n"
+        "    if (CFStringGetCString(a, buf, sizeof(buf), kCFStringEncodingUTF8))\n"
+        "        printf(\"cstr=%s\\n\", buf);\n"
+        "    items[0] = a; items[1] = b;\n"
+        "    arr = CFArrayCreate(kCFAllocatorDefault, items, 2, NULL);\n"
+        "    printf(\"count=%ld\\n\", (long)CFArrayGetCount(arr));\n"
+        "    printf(\"elem0=%s\\n\", CFStringGetCStringPtr(\n"
+        "        (CFStringRef)CFArrayGetValueAtIndex(arr, 0),\n"
+        "        kCFStringEncodingUTF8));\n"
+        "    CFRetain(a);\n"
+        "    CFRelease(a);\n"        /* balanced: a stays alive */
+        "    CFRelease(b);\n"        /* frees beta */
+        "    /* a and arr are left for the loader's reset. */\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_framework(dir, target, "cf", source, "CoreFoundation",
+                              exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "danroot";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  danroot stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "len=5");
+    CHECK_CONTAINS(out, "cstr=alpha");
+    CHECK_CONTAINS(out, "count=2");
+    CHECK_CONTAINS(out, "elem0=alpha");
+    CHECK_CONTAINS(err, "alpha"); /* CFShow writes to stderr */
+    /* Nothing may be left allocated after the run. */
+    CHECK(strstr(err, "LeakSanitizer") == NULL);
+    CHECK(strstr(err, "leaked") == NULL);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * Objective-C: a Mach-O linked with -framework Foundation drives the
+ * runtime directly from C -- objc_getClass("NSString"), sel_registerName,
+ * objc_msgSend to build a string and read it back, and NSLog -- all through
+ * the clean-room libobjc shim, leaving no leaks.
+ */
+static void test_danroot_objc(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_objc_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *source =
+        "#include <objc/objc.h>\n"
+        "#include <objc/runtime.h>\n"
+        "#include <objc/message.h>\n"
+        "#include <Foundation/Foundation.h>\n"
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    void *pool = objc_autoreleasePoolPush();\n"
+        "    id cls = (id)objc_getClass(\"NSString\");\n"
+        "    SEL sel = sel_registerName(\"stringWithUTF8String:\");\n"
+        "    id str = objc_msgSend(cls, sel, \"hello objc\");\n"
+        "    const char *utf = (const char *)objc_msgSend(\n"
+        "        str, sel_registerName(\"UTF8String\"));\n"
+        "    unsigned long len = (unsigned long)objc_msgSend(\n"
+        "        str, sel_registerName(\"length\"));\n"
+        "    printf(\"utf=%s len=%lu\\n\", utf, len);\n"
+        "    NSLog(str);\n"
+        "    objc_autoreleasePoolPop(pool);\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_framework(dir, target, "objc", source, "Foundation",
+                              exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "danroot";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  danroot stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "utf=hello objc len=10");
+    CHECK_CONTAINS(err, "hello objc"); /* NSLog writes to stderr */
+    CHECK(strstr(err, "LeakSanitizer") == NULL);
+    CHECK(strstr(err, "leaked") == NULL);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -5949,6 +6249,10 @@ int main(void)
     RUN(test_danroot_root_path_virtualization);
     RUN(test_danroot_mach_time);
     RUN(test_danroot_root_error_paths);
+
+    RUN(test_danroot_arm64_stack_protector);
+    RUN(test_danroot_corefoundation);
+    RUN(test_danroot_objc);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

@@ -87,6 +87,7 @@ static const char *libsystem_tbd(void)
         " _sleep, _abort, _exit, _uname, _sysctlbyname,"
         " _opendir, _readdir, _closedir, _stat, _lstat, _fstat,"
         " _mach_absolute_time, _mach_timebase_info, _mach_task_self_,"
+        " ___stack_chk_fail, ___stack_chk_guard,"
         " _dlopen, _dlsym, _dlclose, _dlerror,"
         " ___stdinp, ___stdoutp, ___stderrp, dyld_stub_binder ]\n"
         "...\n";
@@ -548,6 +549,226 @@ static const char *mach_mach_h(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Clean-room CoreFoundation / Objective-C framework stubs            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The CoreFoundation and Foundation stubs mirror the loader's clean-room
+ * shims (src/danroot_cf.c, src/danroot_objc.c): the symbol lists are
+ * exactly what those tables can resolve at run time, so an image linked
+ * against them runs immediately under `masa run`.
+ */
+static const char *corefoundation_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/CoreFoundation.framework"
+        "/CoreFoundation'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 150.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _CFStringCreateWithCString,"
+        " _CFStringGetCStringPtr, _CFStringGetCString, _CFStringGetLength,"
+        " _CFShow, _CFRetain, _CFRelease, _kCFAllocatorDefault,"
+        " _CFArrayCreate, _CFArrayGetCount, _CFArrayGetValueAtIndex ]\n"
+        "...\n";
+}
+
+static const char *foundation_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/Foundation.framework"
+        "/Foundation'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 300.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _NSLog, _objc_getClass, _sel_registerName,"
+        " _objc_msgSend, _objc_autoreleasePoolPush,"
+        " _objc_autoreleasePoolPop ]\n"
+        "...\n";
+}
+
+static const char *libobjc_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/usr/lib/libobjc.A.dylib'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _objc_getClass, _sel_registerName,"
+        " _objc_msgSend, _objc_autoreleasePoolPush,"
+        " _objc_autoreleasePoolPop, _NSLog ]\n"
+        "...\n";
+}
+
+static const char *corefoundation_h(void)
+{
+    return
+        "#ifndef MASA_STUB_COREFOUNDATION_H\n"
+        "#define MASA_STUB_COREFOUNDATION_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's CoreFoundation.  Only the two\n"
+        " * reference-counted types the Danroot shim models (CFString and\n"
+        " * CFArray) plus retain/release are declared.\n"
+        " */\n"
+        "#include <stddef.h>\n"
+        "\n"
+        "typedef const void *CFTypeRef;\n"
+        "typedef const struct __CFString *CFStringRef;\n"
+        "typedef const struct __CFArray *CFArrayRef;\n"
+        "typedef const struct __CFAllocator *CFAllocatorRef;\n"
+        "typedef unsigned long CFIndex;\n"
+        "typedef unsigned int CFStringEncoding;\n"
+        "typedef unsigned char Boolean;\n"
+        "\n"
+        "/* kCFStringEncodingUTF8 */\n"
+        "#define kCFStringEncodingUTF8 0x08000100\n"
+        "\n"
+        "extern const CFAllocatorRef kCFAllocatorDefault;\n"
+        "\n"
+        "CFStringRef CFStringCreateWithCString(CFAllocatorRef alloc,\n"
+        "                                      const char *cStr,\n"
+        "                                      CFStringEncoding encoding);\n"
+        "const char *CFStringGetCStringPtr(CFStringRef s,\n"
+        "                                  CFStringEncoding encoding);\n"
+        "Boolean CFStringGetCString(CFStringRef s, char *buffer,\n"
+        "                           CFIndex bufferSize,\n"
+        "                           CFStringEncoding encoding);\n"
+        "CFIndex CFStringGetLength(CFStringRef s);\n"
+        "\n"
+        "CFArrayRef CFArrayCreate(CFAllocatorRef alloc, const void **values,\n"
+        "                         CFIndex numValues, const void *callBacks);\n"
+        "CFIndex CFArrayGetCount(CFArrayRef a);\n"
+        "const void *CFArrayGetValueAtIndex(CFArrayRef a, CFIndex idx);\n"
+        "\n"
+        "CFTypeRef CFRetain(CFTypeRef cf);\n"
+        "void CFRelease(CFTypeRef cf);\n"
+        "void CFShow(CFTypeRef obj);\n"
+        "\n"
+        "#endif /* MASA_STUB_COREFOUNDATION_H */\n";
+}
+
+static const char *foundation_h(void)
+{
+    return
+        "#ifndef MASA_STUB_FOUNDATION_H\n"
+        "#define MASA_STUB_FOUNDATION_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's Foundation.  NSLog is declared for\n"
+        " * plain C as well, so a C program can drive the runtime directly;\n"
+        " * the class interface is only visible to Objective-C.\n"
+        " */\n"
+        "#include <objc/objc.h>\n"
+        "#include <objc/message.h>\n"
+        "\n"
+        "void NSLog(id format, ...);\n"
+        "\n"
+        "#ifdef __OBJC__\n"
+        "@interface NSString : NSObject\n"
+        "+ (id)stringWithUTF8String:(const char *)cStr;\n"
+        "- (const char *)UTF8String;\n"
+        "- (unsigned long)length;\n"
+        "@end\n"
+        "#endif\n"
+        "\n"
+        "#endif /* MASA_STUB_FOUNDATION_H */\n";
+}
+
+static const char *objc_objc_h(void)
+{
+    return
+        "#ifndef MASA_STUB_OBJC_OBJC_H\n"
+        "#define MASA_STUB_OBJC_OBJC_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of <objc/objc.h>: the object and class handle\n"
+        " * types a program needs to name a class or send it a message.  The\n"
+        " * types are usable from plain C; the class interface is guarded so a\n"
+        " * C translation unit can include this header too.\n"
+        " */\n"
+        "#include <stddef.h>\n"
+        "\n"
+        "typedef struct objc_class *Class;\n"
+        "typedef struct objc_object {\n"
+        "    Class isa;\n"
+        "} *id;\n"
+        "typedef struct objc_selector *SEL;\n"
+        "\n"
+        "typedef signed char BOOL;\n"
+        "#ifndef YES\n"
+        "#define YES ((BOOL)1)\n"
+        "#define NO  ((BOOL)0)\n"
+        "#endif\n"
+        "\n"
+        "typedef long NSInteger;\n"
+        "typedef unsigned long NSUInteger;\n"
+        "\n"
+        "#ifdef __OBJC__\n"
+        "@class NSString;\n"
+        "@interface NSObject\n"
+        "- (id)init;\n"
+        "- (id)retain;\n"
+        "- (void)release;\n"
+        "- (id)autorelease;\n"
+        "@end\n"
+        "#endif\n"
+        "\n"
+        "#endif /* MASA_STUB_OBJC_OBJC_H */\n";
+}
+
+static const char *objc_runtime_h(void)
+{
+    return
+        "#ifndef MASA_STUB_OBJC_RUNTIME_H\n"
+        "#define MASA_STUB_OBJC_RUNTIME_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of <objc/runtime.h>: class lookup, selector\n"
+        " * registration and the autorelease-pool entry points.\n"
+        " */\n"
+        "#include <objc/objc.h>\n"
+        "\n"
+        "Class objc_getClass(const char *name);\n"
+        "SEL sel_registerName(const char *name);\n"
+        "\n"
+        "void *objc_autoreleasePoolPush(void);\n"
+        "void objc_autoreleasePoolPop(void *pool);\n"
+        "\n"
+        "#endif /* MASA_STUB_OBJC_RUNTIME_H */\n";
+}
+
+static const char *objc_message_h(void)
+{
+    return
+        "#ifndef MASA_STUB_OBJC_MESSAGE_H\n"
+        "#define MASA_STUB_OBJC_MESSAGE_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of <objc/message.h>.  objc_msgSend is variadic:\n"
+        " * the message arguments follow the selector, and the shim reads the\n"
+        " * ones the selector needs.\n"
+        " */\n"
+        "#include <objc/objc.h>\n"
+        "\n"
+        "id objc_msgSend(id self, SEL op, ...);\n"
+        "\n"
+        "#endif /* MASA_STUB_OBJC_MESSAGE_H */\n";
+}
+
+/* ------------------------------------------------------------------ */
 /* sdk init-stub                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -574,7 +795,22 @@ static const struct stub_file stub_files[] = {
     { "usr/include/sys/utsname.h", sys_utsname_h },
     { "usr/include/sys/sysctl.h", sys_sysctl_h },
     { "usr/include/mach/mach_time.h", mach_mach_time_h },
-    { "usr/include/mach/mach.h", mach_mach_h }
+    { "usr/include/mach/mach.h", mach_mach_h },
+    /* Objective-C runtime: a stub library plus its headers. */
+    { "usr/lib/libobjc.A.tbd", libobjc_tbd },
+    { "usr/lib/libobjc.dylib.tbd", libobjc_tbd },
+    { "usr/include/objc/objc.h", objc_objc_h },
+    { "usr/include/objc/runtime.h", objc_runtime_h },
+    { "usr/include/objc/message.h", objc_message_h },
+    /* Frameworks the clean-room loader satisfies at run time. */
+    { "System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd",
+      corefoundation_tbd },
+    { "System/Library/Frameworks/CoreFoundation.framework/Headers"
+      "/CoreFoundation.h", corefoundation_h },
+    { "System/Library/Frameworks/Foundation.framework/Foundation.tbd",
+      foundation_tbd },
+    { "System/Library/Frameworks/Foundation.framework/Headers/Foundation.h",
+      foundation_h }
 };
 
 static int sdk_init_stub(const char *dir)

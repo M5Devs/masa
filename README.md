@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.3.0](https://img.shields.io/badge/version-v1.3.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.4.0](https://img.shields.io/badge/version-v1.4.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -100,26 +100,34 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 
 ## Status
 
-Milestone 13 (v1.3.0): the Masa Danroot loader gains **Layer 2** - a
-proot-style virtual root plus the directory, stat and Mach shims a real
-Darwin program expects. `masa run --root <dir> <binary>` (or
-`MASA_DANROOT_ROOT=<dir>`) rewrites paths under the macOS system prefixes
-(`/Users`, `/Applications`, `/Library`, `/System`, `/opt/homebrew`,
-`/usr/local`) to live beneath `<dir>`, so a program that reads
-`/Users/me/hello.txt` or creates `/Applications/MyApp` never touches the
-host's own filesystem. The shim also gains POSIX directory and stat calls -
-`opendir`/`readdir`/`closedir` and `stat`/`lstat`/`fstat` - translating the
-host's `struct stat` and `struct dirent` into the exact 64-bit Darwin ABI
-layouts (144-byte `struct stat`, `struct dirent` with `d_name` at byte 21),
-and a clean-room Mach time/task subset (`mach_absolute_time`,
-`mach_timebase_info` reporting a 1:1 timebase, and `mach_task_self_`). The
-stub SDK grows `dirent.h`, a full `sys/stat.h`, `stdint.h` and
-`mach/mach_time.h` + `mach/mach.h`, and `libSystem.tbd` exports the new
-symbols. This sits on the Milestone 12 dynamic library loading (v1.2.0), the
-Milestone 11 loader core (`masa run` / `masa danroot` executing a Mach-O
-`MH_EXECUTE` binary built by `masa cc` - a clean-room, in-process
-reimplementation of the `dyld` steps a self-contained executable needs), the
-Milestone 10 distribution work
+Milestone 14 (v1.4.0): the Masa Danroot loader gains **Layer 3** - a
+clean-room CoreFoundation and Objective-C/Foundation runtime, plus the
+`arm64` stack-protector fix that lets a default-configured arm64 program
+link at all. The stub SDK now writes
+`System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd`
+(and its header) so `masa cc -framework CoreFoundation` compiles and links
+cleanly, and the loader satisfies the framework's symbols in-process: a
+reference-counted `CFString` (`CFStringCreateWithCString`,
+`CFStringGetCStringPtr`, `CFStringGetCString`, `CFStringGetLength`) and
+`CFArray` (`CFArrayCreate`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`),
+`CFRetain`/`CFRelease`, `CFShow` and `kCFAllocatorDefault`. A matching
+`libobjc.A.tbd`, `Foundation.framework/Foundation.tbd` and the
+`objc/objc.h`, `objc/runtime.h`, `objc/message.h` headers back a lightweight
+Objective-C runtime (`objc_getClass`, `sel_registerName`, a variadic
+`objc_msgSend` that understands the common `NSObject`/`NSString` selectors,
+the autorelease-pool entry points, and `NSLog`). Every object the shimmed
+runtimes hold is tracked and freed when a run finishes, so a program that
+never balances its retains still leaves the process leak-free. The same
+release exports `___stack_chk_fail` and `___stack_chk_guard` from
+`libSystem.tbd` and provides them as Danroot shims (a clean canary and a
+clean abort on mismatch), so an arm64 program that uses a stack buffer
+links into a real `MH_EXECUTE` and runs. This sits on the Milestone 13
+Danroot Layer 2 (v1.3.0) - the proot-style virtual root plus the directory,
+stat and Mach time/task shims - the Milestone 12 dynamic library loading
+(v1.2.0), the Milestone 11 loader core (`masa run` / `masa danroot`
+executing a Mach-O `MH_EXECUTE` binary built by `masa cc` - a clean-room,
+in-process reimplementation of the `dyld` steps a self-contained executable
+needs), the Milestone 10 distribution work
 (`masa pack` to `.ipa`/`.dmg`, the Homebrew single-string `system` fix), the
 Milestone 9 local independence (`masa doctor`, `make dist`, self-hosted CI,
 the Windows ConPTY backend), the Milestone 8 standalone GUI terminal
@@ -431,15 +439,23 @@ rejected by both modes.
 `usr/lib/libSystem.tbd`, which is what a link needs.
 
 `masa sdk init-stub <dir>` writes a clean-room stub SDK: TAPI v4 `.tbd` files
-for `libSystem`, `libgcc_s.1` and the `crt1.o` / `dylib1.o` link stubs, plus
-the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `stdint.h`,
-`unistd.h`, `fcntl.h`, `dlfcn.h`, `dirent.h`, `sys/stat.h`, `sys/utsname.h`,
-`sys/sysctl.h`, `mach/mach_time.h`, `mach/mach.h`). It
+for `libSystem`, `libgcc_s.1`, `libobjc.A` and the `crt1.o` / `dylib1.o` link
+stubs, plus the standard headers (`stdio.h`, `stdlib.h`, `string.h`,
+`stdint.h`, `unistd.h`, `fcntl.h`, `dlfcn.h`, `dirent.h`, `sys/stat.h`,
+`sys/utsname.h`, `sys/sysctl.h`, `mach/mach_time.h`, `mach/mach.h`, and the
+`objc/objc.h`, `objc/runtime.h`, `objc/message.h` Objective-C headers). It
+also writes the `CoreFoundation` and `Foundation` framework stubs
+(`System/Library/Frameworks/<Name>.framework/<Name>.tbd` plus their
+`Headers/<Name>.h`), so `masa cc -framework CoreFoundation` (or
+`-framework Foundation`) compiles and links against them; `clang` finds them
+through the `-isysroot` the wrapper injects. The SDK
 contains no Apple code, and it is enough for `ld64.lld` to produce real
 `MH_EXECUTE` and `MH_DYLIB` images. `sys/stat.h` carries the full 64-bit
 Darwin `struct stat` and `dirent.h` the Darwin `struct dirent`, so a program
 can read `st_size`/`S_ISREG` and `readdir` results straight back from the
-Danroot shims.
+Danroot shims. `libSystem.tbd` exports `___stack_chk_fail` and
+`___stack_chk_guard`, so an `arm64` program that uses a stack buffer links
+without extra flags.
 
 ```sh
 masa sdk init-stub /opt/masa/sdk
@@ -694,6 +710,38 @@ given. The standard streams are exposed as data symbols (`__stdoutp`
 and friends). An `exit()` call unwinds back to the loader (so cleanup still
 runs) and its status becomes the process exit code.
 
+**CoreFoundation and Objective-C (Layer 3).** `masa run` also satisfies the
+`CoreFoundation` and `Foundation` frameworks, so a program linked with
+`-framework CoreFoundation` (or `-framework Foundation`) runs without the
+real frameworks present. The CoreFoundation shim implements a
+reference-counted `CFString` (`CFStringCreateWithCString`,
+`CFStringGetCStringPtr`, `CFStringGetCString`, `CFStringGetLength`) and
+`CFArray` (`CFArrayCreate`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`),
+plus `CFRetain`/`CFRelease`, `CFShow` and the `kCFAllocatorDefault` handle:
+
+```sh
+masa cc app.c -framework CoreFoundation -o app
+masa run ./app
+```
+
+The Objective-C shim (`libobjc.A.dylib`, also reachable through
+`Foundation.framework/Foundation`) provides `objc_getClass`,
+`sel_registerName`, a variadic `objc_msgSend` that understands the common
+`NSObject`/`NSString` selectors (`alloc`, `init`, `stringWithUTF8String:`,
+`UTF8String`, `length`, `retain`, `release`, `autorelease`), the
+autorelease-pool entry points `objc_autoreleasePoolPush` /
+`objc_autoreleasePoolPop`, and `NSLog` (which accepts an `NSString` or a
+plain C format string and prints to stderr). Every object the two runtimes
+hold is tracked and released when the run finishes, so a program that never
+balances its retains still leaves nothing allocated.
+
+**Stack protector.** The stub `libSystem.tbd` exports `___stack_chk_fail`
+and `___stack_chk_guard`, and the loader provides both as shims: the guard
+is a fixed non-zero canary and a mismatch prints
+`masa: danroot: stack smashing detected, aborting` and aborts cleanly. This
+is what lets an `arm64` program - whose compiler enables the stack protector
+by default - link into a real `MH_EXECUTE` at all.
+
 Errors are reported clearly and never crash:
 
 ```
@@ -880,7 +928,18 @@ root (the host's `/Applications/MyApp` never appears); a second program calls
 `mach_timebase_info` and `mach_absolute_time` twice, checking the `1:1`
 timebase, monotonic non-decreasing nanoseconds and the `0x103` task port; and
 the error paths (`stat` of a missing file under the root, `--root` with no
-directory) are checked to fail cleanly without leaking.
+directory) are checked to fail cleanly without leaking. The Milestone 14
+tests link a program with a stack buffer for `arm64` (whose compiler enables
+the stack protector by default) and assert the result is a valid
+`MH_EXECUTE` (`CF FA ED FE`, filetype 2), proving the `__stack_chk_*` shims
+resolve; a CoreFoundation program linked with `-framework CoreFoundation`
+creates a `CFString` and `CFArray`, calls `CFShow`, reads the string back
+with `CFStringGetCString`/`CFStringGetCStringPtr`, counts the array and
+balances one `CFRetain`/`CFRelease`, and is run through `masa danroot` with
+its output checked and no LeakSanitizer report; and an Objective-C program
+linked with `-framework Foundation` calls `objc_getClass("NSString")`,
+`sel_registerName`, `objc_msgSend` and `NSLog` and is likewise checked to run
+clean with no leaks.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c

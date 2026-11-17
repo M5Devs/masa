@@ -42,6 +42,7 @@
 
 #include "masa.h"
 #include "masa_compat.h"
+#include "danroot_internal.h"
 
 #include <stdio.h>
 
@@ -1106,6 +1107,26 @@ static int dr_shim_mach_timebase_info(void *info)
     return 0;
 }
 
+/* --- stack protector ---------------------------------------------- */
+
+/*
+ * The compiler guards a function frame with a canary it loads from
+ * __stack_chk_guard and re-checks before returning; on mismatch it calls
+ * __stack_chk_fail.  The canary here is a fixed non-zero value (a
+ * clean-room stand-in for the kernel-randomised one a real process uses).
+ * A mismatch means a genuine buffer overflow inside the loaded program, so
+ * the shim reports it and aborts cleanly rather than corrupting the loader.
+ */
+static uint64_t dr_stack_chk_guard = 0x0d6d6173616c6974ULL;
+
+static void dr_shim_stack_chk_fail(void)
+{
+    fflush(NULL);
+    fprintf(stderr, "masa: danroot: stack smashing detected, aborting\n");
+    fflush(NULL);
+    abort();
+}
+
 /* --- dynamic linker (wired into the loader below) ----------------- */
 
 static void *dr_dlopen(const char *path, int mode);
@@ -1199,6 +1220,9 @@ static const struct dr_symbol dr_symbols[] = {
     /* Mach time and task */
     { "_mach_absolute_time",  (void *)dr_shim_mach_absolute_time },
     { "_mach_timebase_info",  (void *)dr_shim_mach_timebase_info },
+    /* stack protector */
+    { "___stack_chk_fail",  (void *)dr_shim_stack_chk_fail },
+    { "___stack_chk_guard", (void *)&dr_stack_chk_guard },
     /* dynamic linker */
     { "_dlopen",            (void *)dr_dlopen },
     { "_dlsym",             (void *)dr_dlsym },
@@ -1537,6 +1561,16 @@ static void *dr_resolve_symbol(struct dr_loader *ld, const char *name)
 {
     void *p = dr_resolve_shim(name);
 
+    if (p != NULL) {
+        return p;
+    }
+    /* The clean-room CoreFoundation and Objective-C runtimes live in
+     * their own translation units; consult them after the core table. */
+    p = dr_cf_lookup(name);
+    if (p != NULL) {
+        return p;
+    }
+    p = dr_objc_lookup(name);
     if (p != NULL) {
         return p;
     }
@@ -2462,6 +2496,11 @@ static int dr_resolve_dylib_path(const struct dr_loader *ld,
  * libSystem (the C library) plus the stub SDK's crt1.o / dylib1.o, which
  * exist only so ld64.lld produces an executable - the loader supplies
  * their runtime behaviour (the entry call and dyld_stub_binder) itself.
+ *
+ * The clean-room CoreFoundation and Objective-C/Foundation frameworks are
+ * built-in shims too, so an image that links `-framework CoreFoundation`
+ * or `-framework Foundation` (or libobjc) never tries to map a file: the
+ * shim tables satisfy every symbol it imports.
  */
 static int dr_is_system_stub(const char *name)
 {
@@ -2474,7 +2513,20 @@ static int dr_is_system_stub(const char *name)
            strcmp(name, "/usr/lib/dylib1.o") == 0 ||
            strcmp(name, "dylib1.o") == 0 ||
            strcmp(name, "/usr/lib/libgcc_s.1.dylib") == 0 ||
-           strcmp(name, "libgcc_s.1.dylib") == 0;
+           strcmp(name, "libgcc_s.1.dylib") == 0 ||
+           /* CoreFoundation framework */
+           strcmp(name, "/System/Library/Frameworks/CoreFoundation.framework"
+                        "/CoreFoundation") == 0 ||
+           strcmp(name, "CoreFoundation") == 0 ||
+           /* Foundation framework */
+           strcmp(name, "/System/Library/Frameworks/Foundation.framework"
+                        "/Foundation") == 0 ||
+           strcmp(name, "Foundation") == 0 ||
+           /* The Objective-C runtime */
+           strcmp(name, "/usr/lib/libobjc.A.dylib") == 0 ||
+           strcmp(name, "libobjc.A.dylib") == 0 ||
+           strcmp(name, "/usr/lib/libobjc.dylib") == 0 ||
+           strcmp(name, "libobjc.dylib") == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2918,6 +2970,9 @@ static int dr_run(const char *path, int prog_argc, char *const prog_argv[])
     rc = status;
 
 done:
+    /* Release whatever the program left in the shimmed runtimes. */
+    dr_cf_reset();
+    dr_objc_reset();
     free(argv);
     dr_free_loader(&ld);
     return rc;
