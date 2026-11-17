@@ -92,6 +92,19 @@ void masa_gui_shutdown(struct masa_gui *gui);
  */
 int masa_gui_main(int argc, char *const argv[]);
 
+/* ------------------------------------------------------------------ */
+/* Danroot AppKit/CoreGraphics SDL2 backend (src/danroot_appkit.c)     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The RGBA pixel at the centre of the last frame the AppKit run loop
+ * presented, captured for the test harness.  Returns 1 and fills the four
+ * bytes when a frame has been captured, and 0 otherwise.  This is the
+ * hook a test uses to verify that CGContextFillRect actually painted the
+ * expected colour on screen.
+ */
+int masa_gui_read_pixel(unsigned char *rgba);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1653,7 +1653,29 @@ static void *dr_resolve_symbol(struct dr_loader *ld, const char *name)
     if (p != NULL) {
         return p;
     }
+    /* CoreGraphics/AppKit (SDL2 GUI backend), when it is built in. */
+    p = dr_gui_lookup(name);
+    if (p != NULL) {
+        return p;
+    }
     return dr_lookup_export(ld, name);
+}
+
+/*
+ * Format the diagnostic for an import no shim or image could satisfy.  A
+ * symbol that belongs to the AppKit/CoreGraphics surface gets the extra
+ * hint that the SDL2 backend has to be built in.
+ */
+static void dr_report_unresolved(const char *name, char *err, size_t errcap)
+{
+    if (dr_gui_is_gui_symbol(name)) {
+        snprintf(err, errcap,
+                 "unresolved GUI symbol '%s' - this build of masa has no "
+                 "AppKit/CoreGraphics backend; rebuild with `make gui`",
+                 name);
+    } else {
+        snprintf(err, errcap, "unresolved symbol '%s'", name);
+    }
 }
 
 /*
@@ -2025,8 +2047,7 @@ static int dr_apply_chained(struct dr_loader *ld, struct dr_module *m,
                                 *slot = addend; /* weak: NULL + addend */
                                 goto next_slot;
                             }
-                            snprintf(err, errcap,
-                                     "unresolved symbol '%s'", names[ordinal]);
+                            dr_report_unresolved(names[ordinal], err, errcap);
                             rc = -1;
                             break;
                         }
@@ -2138,7 +2159,7 @@ static int dr_apply_one_bind(struct dr_loader *ld, const struct dr_image *img,
             *(uint64_t *)(uintptr_t)addr = (uint64_t)addend;
             return 0;
         }
-        snprintf(err, errcap, "unresolved symbol '%s'", name);
+        dr_report_unresolved(name, err, errcap);
         return -1;
     }
     *(uint64_t *)(uintptr_t)addr = (uint64_t)(uintptr_t)target + (uint64_t)addend;
@@ -2576,10 +2597,11 @@ static int dr_resolve_dylib_path(const struct dr_loader *ld,
  * exist only so ld64.lld produces an executable - the loader supplies
  * their runtime behaviour (the entry call and dyld_stub_binder) itself.
  *
- * The clean-room CoreFoundation and Objective-C/Foundation frameworks are
- * built-in shims too, so an image that links `-framework CoreFoundation`
- * or `-framework Foundation` (or libobjc) never tries to map a file: the
- * shim tables satisfy every symbol it imports.
+ * The clean-room CoreFoundation, Objective-C/Foundation and (when built
+ * with SDL2) AppKit/CoreGraphics/Cocoa frameworks are built-in shims too,
+ * so an image that links `-framework CoreFoundation`, `-framework
+ * Foundation`, `-framework Cocoa` (or libobjc) never tries to map a file:
+ * the shim tables satisfy every symbol it imports.
  */
 static int dr_is_system_stub(const char *name)
 {
@@ -2601,6 +2623,18 @@ static int dr_is_system_stub(const char *name)
            strcmp(name, "/System/Library/Frameworks/Foundation.framework"
                         "/Foundation") == 0 ||
            strcmp(name, "Foundation") == 0 ||
+           /* CoreGraphics framework (SDL2 GUI backend) */
+           strcmp(name, "/System/Library/Frameworks/CoreGraphics.framework"
+                        "/CoreGraphics") == 0 ||
+           strcmp(name, "CoreGraphics") == 0 ||
+           /* AppKit framework (SDL2 GUI backend) */
+           strcmp(name, "/System/Library/Frameworks/AppKit.framework"
+                        "/AppKit") == 0 ||
+           strcmp(name, "AppKit") == 0 ||
+           /* Cocoa umbrella framework (SDL2 GUI backend) */
+           strcmp(name, "/System/Library/Frameworks/Cocoa.framework"
+                        "/Cocoa") == 0 ||
+           strcmp(name, "Cocoa") == 0 ||
            /* The Objective-C runtime */
            strcmp(name, "/usr/lib/libobjc.A.dylib") == 0 ||
            strcmp(name, "libobjc.A.dylib") == 0 ||
@@ -3294,6 +3328,7 @@ done:
     /* Release whatever the program left in the shimmed runtimes. */
     dr_cf_reset();
     dr_objc_reset();
+    dr_gui_reset();
     free(argv);
     dr_free_loader(&ld);
     return rc;

@@ -301,6 +301,26 @@ void *dr_cf_lookup(const char *name)
     return NULL;
 }
 
+/*
+ * Recover the text of a live CFString, or NULL when p is not one.  The
+ * pointer is matched against the live list first, so a plain C string that
+ * merely resembles an object header is never dereferenced.
+ */
+const char *dr_cf_string_utf8(const void *p)
+{
+    dr_cf_base *b;
+
+    if (p == NULL) {
+        return NULL;
+    }
+    for (b = dr_cf_objects; b != NULL; b = b->next) {
+        if ((const void *)b == p) {
+            return b->kind == 1 ? ((dr_cf_string *)b)->utf8 : NULL;
+        }
+    }
+    return NULL;
+}
+
 void dr_cf_reset(void)
 {
     while (dr_cf_objects != NULL) {
@@ -316,6 +336,12 @@ void dr_cf_reset(void)
 void *dr_cf_lookup(const char *name)
 {
     (void)name;
+    return NULL;
+}
+
+const char *dr_cf_string_utf8(const void *p)
+{
+    (void)p;
     return NULL;
 }
 

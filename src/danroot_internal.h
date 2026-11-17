@@ -86,6 +86,45 @@ void *dr_cf_lookup(const char *name);
 void *dr_objc_lookup(const char *name);
 
 /*
+ * Describe a shimmed object as a C string when one can be recovered.
+ *
+ *   dr_cf_string_utf8(p)  - the UTF-8 text of p when p is a live CFString,
+ *                           otherwise NULL (pointer identity is checked
+ *                           against the CF live list, so a C string that
+ *                           merely looks like an object is never dereferenced).
+ *   dr_objc_cstr_of(p)    - the text of an NSString/CFString object, or p
+ *                           itself when it is a plain C string; used by
+ *                           NSLog and the AppKit title/selector shims.
+ */
+const char *dr_cf_string_utf8(const void *p);
+const char *dr_objc_cstr_of(const void *p);
+
+/*
+ * GUI backend (src/danroot_appkit.c): a clean-room AppKit/CoreGraphics
+ * built over SDL2, so a self-contained Darwin GUI program can open a real
+ * window and draw into it.  The SDL2 code is compiled only when
+ * MASA_DANROOT_SDL2 is defined (the `make gui` / `make test-gui` builds);
+ * otherwise the same translation unit provides these as inert stubs so the
+ * core loader keeps building with no SDL2 dependency at all.
+ *
+ *   dr_gui_available()  - 1 when the SDL2 backend is compiled in.
+ *   dr_gui_class(name)  - the class handle for an AppKit class, or NULL.
+ *   dr_gui_msgSend()    - handle an AppKit selector on recv; returns 1 and
+ *                         stores the result in *out when it owns recv.
+ *   dr_gui_lookup(name) - the address of a CoreGraphics/AppKit symbol.
+ *   dr_gui_is_gui_symbol(name) - 1 when name belongs to the GUI surface,
+ *                         used to explain an unresolved import when the
+ *                         SDL2 backend is absent.
+ *   dr_gui_reset()      - release every window/context a run left behind.
+ */
+int dr_gui_available(void);
+void *dr_gui_class(const char *name);
+int dr_gui_msgSend(void *recv, const char *name, va_list *ap, void **out);
+void *dr_gui_lookup(const char *name);
+int dr_gui_is_gui_symbol(const char *name);
+void dr_gui_reset(void);
+
+/*
  * Free every object a shimmed runtime still holds.  The loader calls these
  * when a run finishes so a program that never released its objects still
  * leaves the process with nothing allocated (AddressSanitizer-clean).

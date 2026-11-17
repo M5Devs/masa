@@ -342,15 +342,185 @@ static void test_gui_main_headless(void)
     free(masa);
 }
 
+/* ------------------------------------------------------------------ */
+/* Danroot AppKit/CoreGraphics SDL2 backend                            */
+/* ------------------------------------------------------------------ */
+
+/* The shim provider entry points live in the loader's private header. */
+#include "../src/danroot_internal.h"
+
+static int have_clang(void)
+{
+    const char *path = getenv("PATH");
+    char *copy;
+    char *dir;
+    char cand[4096];
+
+    if (path == NULL) {
+        return 0;
+    }
+    copy = strdup(path);
+    if (copy == NULL) {
+        return 0;
+    }
+    for (dir = strtok(copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+        snprintf(cand, sizeof(cand), "%s/clang", dir);
+        if (access(cand, X_OK) == 0) {
+            free(copy);
+            return 1;
+        }
+    }
+    free(copy);
+    return 0;
+}
+
+static int write_text(const char *path, const char *text)
+{
+    FILE *fp = fopen(path, "w");
+
+    if (fp == NULL) {
+        return -1;
+    }
+    fputs(text, fp);
+    fclose(fp);
+    return 0;
+}
+
+/* The clean-room AppKit surface must be present in this build, and the
+ * SDL2-backed CoreGraphics/AppKit symbols must resolve. */
+static void test_appkit_symbols(void)
+{
+    printf("[ RUN  ] test_appkit_symbols\n");
+
+    CHECK(dr_gui_available() == 1);
+    CHECK(dr_gui_class("NSApplication") != NULL);
+    CHECK(dr_gui_class("NSWindow") != NULL);
+    CHECK(dr_gui_class("NSView") != NULL);
+    CHECK(dr_gui_class("NotAClass") == NULL);
+
+    CHECK(dr_gui_lookup("_CGContextFillRect") != NULL);
+    CHECK(dr_gui_lookup("_CGContextSetRGBFillColor") != NULL);
+    CHECK(dr_gui_lookup("_CGRectMake") != NULL);
+    CHECK(dr_gui_lookup("_NSMakeRect") != NULL);
+    CHECK(dr_gui_lookup("_NSApplication") != NULL);
+    CHECK(dr_gui_lookup("_definitely_not_a_symbol") == NULL);
+
+    CHECK(dr_gui_is_gui_symbol("_CGContextFillRect") == 1);
+    CHECK(dr_gui_is_gui_symbol("_NSWindow") == 1);
+    CHECK(dr_gui_is_gui_symbol("_malloc") == 0);
+}
+
+/*
+ * End to end: build a Darwin GUI program that opens an NSWindow, fills it
+ * with CoreGraphics and runs the AppKit event loop, load it through the
+ * Danroot loader with the SDL2 backend, and verify that the frame the run
+ * loop presented actually contains the colour the program painted.
+ */
+static void test_appkit_run_paints(void)
+{
+    char dir[] = "/tmp/masa_appkit_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char exe[4096];
+    char *sdk_argv[2];
+    char *cc_argv[8];
+    char *run_argv[2];
+    unsigned char px[4];
+    static const char *source =
+        "#include <CoreGraphics/CoreGraphics.h>\n"
+        "#include <AppKit/AppKit.h>\n"
+        "#include <objc/objc.h>\n"
+        "#include <objc/runtime.h>\n"
+        "#include <objc/message.h>\n"
+        "int main(void) {\n"
+        "    id cls = (id)objc_getClass(\"NSWindow\");\n"
+        "    id win = objc_msgSend(\n"
+        "        objc_msgSend(cls, sel_registerName(\"alloc\")),\n"
+        "        sel_registerName(\"initWithContentRect:styleMask:backing:"
+        "defer:\"),\n"
+        "        (double)0, (double)0, (double)120, (double)120,\n"
+        "        (unsigned long)1, (unsigned long)2, (unsigned long)0);\n"
+        "    id ctx = objc_msgSend(win, sel_registerName(\"CGContext\"));\n"
+        "    CGContextSetRGBFillColor((CGContextRef)ctx, 0.0, 0.0, 1.0,"
+        " 1.0);\n"
+        "    CGContextFillRect((CGContextRef)ctx, CGRectMake(0, 0, 120,"
+        " 120));\n"
+        "    id app = objc_msgSend((id)objc_getClass(\"NSApplication\"),\n"
+        "                          sel_registerName(\"sharedApplication\"));\n"
+        "    objc_msgSend(app, sel_registerName(\"run\"));\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    printf("[ RUN  ] test_appkit_run_paints\n");
+
+    if (!have_clang()) {
+        printf("  SKIP needs clang to build the GUI program\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/app.c", dir);
+    snprintf(exe, sizeof(exe), "%s/app", dir);
+
+    sdk_argv[0] = (char *)"init-stub";
+    sdk_argv[1] = sdk;
+    CHECK(masa_sdk_main(2, sdk_argv) == 0);
+
+    CHECK(write_text(src, source) == 0);
+
+    setenv("MASA_SDK_PATH", sdk, 1);
+    setenv("MASA_TARGET", "x86_64-apple-darwin", 1);
+    setenv("MASA_GUI_FRAMES", "1", 1);
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+
+    cc_argv[0] = (char *)"-framework";
+    cc_argv[1] = (char *)"Cocoa";
+    cc_argv[2] = src;
+    cc_argv[3] = (char *)"-o";
+    cc_argv[4] = exe;
+    cc_argv[5] = NULL;
+    rc = masa_cc_main(5, cc_argv);
+    if (rc != 0) {
+        printf("  SKIP cc could not build the GUI program\n");
+        g_skipped++;
+        return;
+    }
+
+    run_argv[0] = exe;
+    run_argv[1] = NULL;
+    rc = masa_danroot_main(1, run_argv);
+    CHECK(rc == 0);
+
+    /* The centre pixel is the blue rectangle the program filled. */
+    if (masa_gui_read_pixel(px)) {
+        CHECK(px[0] == 0x00); /* R */
+        CHECK(px[1] == 0x00); /* G */
+        CHECK(px[2] == 0xFF); /* B */
+        CHECK(px[3] == 0xFF); /* A */
+    } else {
+        printf("  FAIL no frame was captured\n");
+        g_failed++;
+        g_run++;
+    }
+}
+
 int main(void)
 {
     printf("masa-term GUI tests\n");
-
     test_pty_shell_through_vterm();
     test_pty_resize();
     test_shell_argv_env();
     test_headless_sdl_render();
     test_gui_main_headless();
+    test_appkit_symbols();
+    test_appkit_run_paints();
 
     printf("\n%d tests run, %d failed, %d skipped\n",
            g_run, g_failed, g_skipped);

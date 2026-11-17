@@ -34,11 +34,12 @@ jobs:
       - name: Report version
         run: ./build/masa version
 
-  # The optional GUI terminal (`masa-term`) links SDL2, SDL2_ttf and
-  # libvterm.  It is a separate target so the core tool above stays
-  # dependency-free; here we build it and run its tests headless.
+  # The optional GUI builds link SDL2: `masa-term` (SDL2_ttf + libvterm) and
+  # `masa-gui` (SDL2 only, with the Danroot AppKit/CoreGraphics backend). They
+  # are separate targets so the core tool above stays dependency-free; here we
+  # build them and run the GUI tests headless.
   gui:
-    name: gui (masa-term)
+    name: gui (masa-term, masa-gui)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +50,11 @@ jobs:
           sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libvterm-dev \
             fonts-dejavu-core
 
-      - name: Build masa-term
+      - name: Build the GUI binaries
         run: make gui
 
-      - name: Report the GUI binary
-        run: file build/masa-term
+      - name: Report the GUI binaries
+        run: file build/masa-term build/masa-gui
 
       - name: Test (headless)
         run: SDL_VIDEODRIVER=dummy make test-gui

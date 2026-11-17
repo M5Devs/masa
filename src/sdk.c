@@ -768,6 +768,187 @@ static const char *objc_message_h(void)
         "#endif /* MASA_STUB_OBJC_MESSAGE_H */\n";
 }
 
+/*
+ * The CoreGraphics, AppKit and Cocoa stubs mirror the loader's clean-room
+ * SDL2-backed GUI shims (src/danroot_appkit.c): the symbol lists are the
+ * CoreGraphics functions and the AppKit classes/selectors the shim can
+ * resolve at run time, so a GUI image linked against them runs under a
+ * `make gui` build of `masa run`.
+ */
+static const char *coregraphics_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/CoreGraphics.framework"
+        "/CoreGraphics'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 150.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _CGContextSetRGBFillColor,"
+        " _CGContextFillRect, _CGContextSetRGBStrokeColor,"
+        " _CGContextStrokeRect, _CGContextClearRect,"
+        " _CGContextFlush, _CGRectMake, _CGPointMake, _CGSizeMake,"
+        " _CGColorCreateGenericRGB, _CGColorRelease,"
+        " _CGRectZero, _CGPointZero, _CGSizeZero ]\n"
+        "...\n";
+}
+
+static const char *appkit_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/AppKit.framework"
+        "/AppKit'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 150.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _NSApplication, _NSWindow, _NSView,"
+        " _NSColor, _NSObject, _NSString,"
+        " _NSApp, _NSMakeRect, _NSMakePoint, _NSMakeSize,"
+        " _NSApplicationLoad, _NSApplicationMain ]\n"
+        "...\n";
+}
+
+static const char *cocoa_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/Cocoa.framework"
+        "/Cocoa'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 150.0\n"
+        "reexported-libraries:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    libraries:       [ '/System/Library/Frameworks/AppKit.framework"
+        "/AppKit', '/System/Library/Frameworks/Foundation.framework"
+        "/Foundation', '/System/Library/Frameworks/CoreGraphics.framework"
+        "/CoreGraphics' ]\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ ]\n"
+        "...\n";
+}
+
+static const char *coregraphics_h(void)
+{
+    return
+        "#ifndef MASA_STUB_COREGRAPHICS_H\n"
+        "#define MASA_STUB_COREGRAPHICS_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's CoreGraphics.  The geometry types\n"
+        " * and the context drawing calls the Danroot SDL2 shim models.\n"
+        " */\n"
+        "#include <stddef.h>\n"
+        "\n"
+        "typedef double CGFloat;\n"
+        "\n"
+        "typedef struct CGPoint { CGFloat x; CGFloat y; } CGPoint;\n"
+        "typedef struct CGSize  { CGFloat width; CGFloat height; } CGSize;\n"
+        "typedef struct CGRect  { CGPoint origin; CGSize size; } CGRect;\n"
+        "\n"
+        "typedef struct CGContext *CGContextRef;\n"
+        "typedef struct CGColor *CGColorRef;\n"
+        "\n"
+        "extern const CGRect  CGRectZero;\n"
+        "extern const CGPoint CGPointZero;\n"
+        "extern const CGSize  CGSizeZero;\n"
+        "\n"
+        "CGPoint CGPointMake(CGFloat x, CGFloat y);\n"
+        "CGSize  CGSizeMake(CGFloat width, CGFloat height);\n"
+        "CGRect  CGRectMake(CGFloat x, CGFloat y, CGFloat w, CGFloat h);\n"
+        "\n"
+        "CGColorRef CGColorCreateGenericRGB(CGFloat r, CGFloat g,\n"
+        "                                   CGFloat b, CGFloat a);\n"
+        "void CGColorRelease(CGColorRef color);\n"
+        "\n"
+        "void CGContextSetRGBFillColor(CGContextRef c, CGFloat r, CGFloat g,\n"
+        "                              CGFloat b, CGFloat a);\n"
+        "void CGContextSetRGBStrokeColor(CGContextRef c, CGFloat r, CGFloat g,\n"
+        "                                CGFloat b, CGFloat a);\n"
+        "void CGContextFillRect(CGContextRef c, CGRect rect);\n"
+        "void CGContextStrokeRect(CGContextRef c, CGRect rect);\n"
+        "void CGContextClearRect(CGContextRef c, CGRect rect);\n"
+        "void CGContextFlush(CGContextRef c);\n"
+        "\n"
+        "#endif /* MASA_STUB_COREGRAPHICS_H */\n";
+}
+
+static const char *appkit_h(void)
+{
+    return
+        "#ifndef MASA_STUB_APPKIT_H\n"
+        "#define MASA_STUB_APPKIT_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's AppKit.  The geometry helpers and the\n"
+        " * NSApplication/NSWindow class interface the Danroot SDL2 shim\n"
+        " * models.  The class interface is visible to Objective-C only, so a\n"
+        " * C program can include the header for the geometry types.\n"
+        " */\n"
+        "#include <CoreGraphics/CoreGraphics.h>\n"
+        "#include <objc/objc.h>\n"
+        "#include <objc/message.h>\n"
+        "\n"
+        "typedef CGRect NSRect;\n"
+        "typedef CGPoint NSPoint;\n"
+        "typedef CGSize NSSize;\n"
+        "\n"
+        "NSRect NSMakeRect(CGFloat x, CGFloat y, CGFloat w, CGFloat h);\n"
+        "NSPoint NSMakePoint(CGFloat x, CGFloat y);\n"
+        "NSSize NSMakeSize(CGFloat w, CGFloat h);\n"
+        "\n"
+        "/* AppKit only: load the AppKit framework (a no-op here). */\n"
+        "void NSApplicationLoad(void);\n"
+        "int  NSApplicationMain(int argc, const char **argv);\n"
+        "\n"
+        "#ifdef __OBJC__\n"
+        "@interface NSApplication : NSObject\n"
+        "+ (id)sharedApplication;\n"
+        "- (void)run;\n"
+        "- (void)stop:(id)sender;\n"
+        "- (void)terminate:(id)sender;\n"
+        "- (id)windows;\n"
+        "@end\n"
+        "\n"
+        "@interface NSWindow : NSObject\n"
+        "- (id)initWithContentRect:(NSRect)rect\n"
+        "                 styleMask:(unsigned long)mask\n"
+        "                   backing:(unsigned long)backing\n"
+        "                     defer:(BOOL)flag;\n"
+        "- (void)setTitle:(id)title;\n"
+        "- (void)makeKeyAndOrderFront:(id)sender;\n"
+        "- (id)contentView;\n"
+        "- (void)setBackgroundColor:(id)color;\n"
+        "@end\n"
+        "#endif\n"
+        "\n"
+        "#endif /* MASA_STUB_APPKIT_H */\n";
+}
+
+static const char *cocoa_h(void)
+{
+    return
+        "#ifndef MASA_STUB_COCOA_H\n"
+        "#define MASA_STUB_COCOA_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's Cocoa umbrella framework.  It simply\n"
+        " * pulls in AppKit (and, through it, CoreGraphics and the runtime).\n"
+        " */\n"
+        "#include <AppKit/AppKit.h>\n"
+        "\n"
+        "#endif /* MASA_STUB_COCOA_H */\n";
+}
+
 /* ------------------------------------------------------------------ */
 /* sdk init-stub                                                      */
 /* ------------------------------------------------------------------ */
@@ -810,7 +991,17 @@ static const struct stub_file stub_files[] = {
     { "System/Library/Frameworks/Foundation.framework/Foundation.tbd",
       foundation_tbd },
     { "System/Library/Frameworks/Foundation.framework/Headers/Foundation.h",
-      foundation_h }
+      foundation_h },
+    /* The GUI frameworks the SDL2 AppKit backend satisfies at run time. */
+    { "System/Library/Frameworks/CoreGraphics.framework/CoreGraphics.tbd",
+      coregraphics_tbd },
+    { "System/Library/Frameworks/CoreGraphics.framework/Headers"
+      "/CoreGraphics.h", coregraphics_h },
+    { "System/Library/Frameworks/AppKit.framework/AppKit.tbd", appkit_tbd },
+    { "System/Library/Frameworks/AppKit.framework/Headers/AppKit.h",
+      appkit_h },
+    { "System/Library/Frameworks/Cocoa.framework/Cocoa.tbd", cocoa_tbd },
+    { "System/Library/Frameworks/Cocoa.framework/Headers/Cocoa.h", cocoa_h }
 };
 
 static int sdk_init_stub(const char *dir)

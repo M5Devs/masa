@@ -6153,6 +6153,64 @@ static void test_danroot_objc(void)
 }
 
 /*
+ * A Darwin GUI program imports CoreGraphics/AppKit symbols that the core
+ * `masa` build (no SDL2) cannot satisfy.  The loader must say so plainly,
+ * pointing at `make gui`, rather than reporting a bare unresolved symbol.
+ * The SDL2 backend itself is exercised by the GUI suite (make test-gui).
+ */
+static void test_danroot_gui_symbol_hint(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_guihint_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *source =
+        "#include <CoreGraphics/CoreGraphics.h>\n"
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    /* Filled at run time by the SDL2 backend; here it is only an\n"
+        "     * import the core build cannot resolve. */\n"
+        "    CGContextRef ctx = (CGContextRef)0;\n"
+        "    CGContextFillRect(ctx, CGRectMake(0, 0, 10, 10));\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_framework(dir, target, "guihint", source, "CoreGraphics",
+                              exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "unresolved GUI symbol");
+    CHECK_CONTAINS(err, "make gui");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
  * Build build/masa-aarch64 on demand and return its absolute path.  The
  * cross-architecture bridge needs this aarch64 build of Masa as the ARM64
  * side of the runner.  Returns 0 on success, -1 when the build is not
@@ -6453,6 +6511,7 @@ int main(void)
     RUN(test_danroot_arm64_stack_protector);
     RUN(test_danroot_corefoundation);
     RUN(test_danroot_objc);
+    RUN(test_danroot_gui_symbol_hint);
     RUN(test_danroot_arm64_bridge_on_x86_64);
     RUN(test_danroot_arm64_bridge_fallbacks);
 

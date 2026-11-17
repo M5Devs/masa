@@ -185,7 +185,8 @@ static void *dr_objc_getClass(const char *name)
             return dr_classes[i];
         }
     }
-    return NULL;
+    /* AppKit classes are owned by the SDL2 GUI backend (when built in). */
+    return dr_gui_class(name);
 }
 
 /*
@@ -201,6 +202,19 @@ static void *dr_objc_msgSend_core(void *recv, void *sel, va_list *ap)
 
     if (recv == NULL || name == NULL) {
         return NULL; /* messaging nil yields nil */
+    }
+
+    /*
+     * AppKit receivers (the NSApplication/NSWindow classes and their
+     * instances) are handled by the SDL2 GUI backend; it answers only the
+     * selectors it owns and lets everything else fall through.
+     */
+    {
+        void *gui_out = NULL;
+
+        if (dr_gui_msgSend(recv, name, ap, &gui_out)) {
+            return gui_out;
+        }
     }
 
     if (dr_is_class(recv)) {
@@ -323,20 +337,43 @@ static void dr_objc_autoreleasePoolPop(void *token)
 
 /*
  * The format argument to NSLog is normally an NSString, but a plain C
- * string is accepted too.  A pointer that names a live object is treated
- * as an NSString and its payload used; anything else is taken as a C
- * string directly.
+ * string is accepted too.  A pointer that names a live NSString or
+ * CFString object is treated as a string and its payload used; anything
+ * else is taken as a C string directly.  Both live lists are checked by
+ * pointer identity, so a C string that merely looks like an object is
+ * never dereferenced.
  */
-static const char *dr_objc_cstr_of(const void *p)
+const char *dr_objc_cstr_of(const void *p)
 {
     dr_objc_object *o;
+    const char *cf;
 
     for (o = dr_objects; o != NULL; o = o->live_next) {
         if ((const void *)o == p) {
             return o->cstr;
         }
     }
+    cf = dr_cf_string_utf8(p);
+    if (cf != NULL) {
+        return cf;
+    }
     return (const char *)p;
+}
+
+/*
+ * True when p names a live NSString or CFString object (checked by pointer
+ * identity against both live lists).
+ */
+static int dr_objc_is_string_object(const void *p)
+{
+    dr_objc_object *o;
+
+    for (o = dr_objects; o != NULL; o = o->live_next) {
+        if ((const void *)o == p) {
+            return 1;
+        }
+    }
+    return dr_cf_string_utf8(p) != NULL;
 }
 
 static void dr_objc_NSLog_core(void *format, va_list *ap)
@@ -354,7 +391,16 @@ static void dr_objc_NSLog_core(void *format, va_list *ap)
     }
     fprintf(stderr, "%s Masa[%d] ", ts, (int)getpid());
     if (fmt != NULL) {
-        vfprintf(stderr, fmt, *ap);
+        /*
+         * A string object passed straight to NSLog is a message, not a
+         * printf format, so its text is written verbatim; a bare C string
+         * keeps the classic format-and-arguments behaviour.
+         */
+        if (dr_objc_is_string_object(format)) {
+            fputs(fmt, stderr);
+        } else {
+            vfprintf(stderr, fmt, *ap);
+        }
     }
     fputc('\n', stderr);
     fflush(stderr);
@@ -439,6 +485,11 @@ void *dr_objc_lookup(const char *name)
 {
     (void)name;
     return NULL;
+}
+
+const char *dr_objc_cstr_of(const void *p)
+{
+    return (const char *)p;
 }
 
 void dr_objc_reset(void)

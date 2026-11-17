@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.5.0"
+#define MASA_VERSION "1.6.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -78,6 +78,11 @@ extern "C" {
 /* Set to 1 to disable the cross-architecture bridge entirely, so an arm64
  * image on an x86_64 host reports the plain architecture mismatch. */
 #define MASA_DANROOT_NO_BRIDGE_ENV "MASA_DANROOT_NO_BRIDGE"
+
+/* Number of frames the AppKit SDL2 run loop draws before returning, so an
+ * automated test can drive a GUI program headlessly and exit cleanly.
+ * Unset means run until the window is closed. */
+#define MASA_GUI_FRAMES_ENV "MASA_GUI_FRAMES"
 
 /* Exit status returned when the wrapper cannot spawn a tool at all. */
 #define MASA_EXIT_SPAWN_ERROR 127

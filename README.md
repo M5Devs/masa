@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.5.0](https://img.shields.io/badge/version-v1.5.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.6.0](https://img.shields.io/badge/version-v1.6.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -113,22 +113,23 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 
 ## Status
 
-Milestone 15 (v1.5.0): the Masa Danroot loader gains **Layer 4** - a
-cross-architecture bridge that runs an `arm64-apple-darwin` Mach-O image on
-an x86_64 host. The loader is architecture-matched by construction (it maps
-an image and jumps to its entry point), so an arm64 image cannot be mapped
-on an x86_64 CPU. The bridge closes that gap with `qemu-aarch64` running a
-Linux ARM64 build of Masa (`make aarch64`), which maps and jumps to the
-arm64 image exactly as a native ARM64 host would; the runner's exit status
-is passed straight through. `masa run` discovers `qemu-aarch64` and
-`masa-aarch64` (overridable with `MASA_QEMU_AARCH64` /
-`MASA_DANROOT_AARCH64`; `MASA_DANROOT_NO_BRIDGE=1` disables it), falls back
-to the plain architecture-mismatch diagnostic when either is missing, and
-`masa doctor` reports whether both halves are present. Because Apple's arm64
-ABI passes variadic arguments on the stack while the host AArch64 ABI reads
-them from registers, the aarch64 build carries stack-varargs trampolines for
-`printf`, `fprintf`, `snprintf`, `sprintf`, `sscanf` and `vsnprintf` so a
-bridged program's formatted output is correct. This sits on the Milestone 14
+Milestone 16 (v1.6.0): the Masa Danroot loader gains **Layer 5** - a
+clean-room **AppKit and CoreGraphics** built over **SDL2**, so a self-contained
+Darwin GUI program runs natively and opens a real window. A program that calls
+`NSApplication`/`NSWindow` through the Objective-C runtime and draws with
+`CGContextFillRect` gets an SDL2 window with those rectangles painted on
+screen; the run loop draws each frame, and every fill the program made before
+entering the loop is replayed on top (the way an AppKit view redraws itself),
+so a Darwin app that draws once and then calls `[NSApp run]` still shows its
+content. The backend is compiled in only for the GUI build (`make gui`
+produces `build/masa-gui` with `-DMASA_DANROOT_SDL2`), so the core tool and
+its tests stay 100% SDL2-free; the plain `masa run` reports a clear
+`unresolved GUI symbol '...' - rebuild with 'make gui'` for the first AppKit
+symbol it cannot satisfy. This sits on the Milestone 15 Danroot Layer 4
+(v1.5.0) - the cross-architecture bridge that runs an `arm64-apple-darwin`
+Mach-O image on an x86_64 host through `qemu-aarch64` and a Linux ARM64 build
+of Masa, with stack-varargs trampolines that make a bridged program's
+formatted output correct - the Milestone 14
 Danroot Layer 3 (v1.4.0) - the clean-room CoreFoundation and
 Objective-C/Foundation runtimes and the arm64 stack-protector fix - the
 Milestone 13
@@ -167,8 +168,9 @@ turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
   packages `gcc-aarch64-linux-gnu` and `qemu-user`). None of these are needed
   for `make` or `make test`.
 - Optional, for `make gui` only: `libsdl2-dev`, `libsdl2-ttf-dev`,
-  `libvterm-dev` (plus a monospace font such as `fonts-dejavu-core`). None of
-  these are needed for `make` or `make test`.
+  `libvterm-dev` (plus a monospace font such as `fonts-dejavu-core`). The
+  Danroot AppKit backend that `make gui` compiles in needs only `libsdl2-dev`.
+  None of these are needed for `make` or `make test`.
 
 ## Building
 
@@ -176,7 +178,7 @@ turn rest on the Milestone 1 `cc` wrapper and `sys` shims.
 make          # builds build/masa
 make test     # builds and runs the unit test suite
 make aarch64  # builds build/masa-aarch64 (the bridge's ARM64 side)
-make gui      # builds build/masa-term (SDL2 + SDL2_ttf + libvterm)
+make gui      # builds build/masa-term and build/masa-gui (SDL2)
 make test-gui # builds and runs the headless GUI test suite
 make dist     # packages local builds into dist/ (see below)
 make clean
@@ -185,10 +187,16 @@ make clean
 Sources are compiled with `-std=c11 -Wall -Wextra -Werror -fsanitize=address`,
 so the build fails on any warning and the tests run under AddressSanitizer.
 
-`make gui` and `make test-gui` are the only targets that need the SDL2,
-SDL2_ttf and libvterm development packages; the Makefile asks `pkg-config`
-for their flags. Override `GUI_CFLAGS` / `GUI_LIBS` if the headers are not on
-the default `pkg-config` path.
+`make gui` builds two binaries: `build/masa-term` (the SDL2 + SDL2_ttf +
+libvterm terminal) and `build/masa-gui` (`masa` with the Danroot
+AppKit/CoreGraphics SDL2 backend compiled in, `-DMASA_DANROOT_SDL2`). The core
+`build/masa` never links SDL2 - it reports a clear "rebuild with `make gui`"
+for any AppKit symbol it cannot satisfy. `make gui` and `make test-gui` are
+the only targets that need the SDL2, SDL2_ttf and libvterm development
+packages; the Makefile asks `pkg-config` for their flags. Override
+`GUI_CFLAGS` / `GUI_LIBS` (and `GUI_APTK_CFLAGS` / `GUI_APTK_LIBS` for the
+SDL2-only AppKit backend) if the headers are not on the default `pkg-config`
+path.
 
 To cross-compile Masa for Android with the NDK (no AddressSanitizer, which the
 NDK does not ship):
@@ -753,6 +761,35 @@ plain C format string and prints to stderr). Every object the two runtimes
 hold is tracked and released when the run finishes, so a program that never
 balances its retains still leaves nothing allocated.
 
+**AppKit and CoreGraphics (Layer 5).** Built only for the GUI binary
+(`make gui`, which compiles `src/danroot_appkit.c` with `-DMASA_DANROOT_SDL2`
+into `build/masa-gui`), `masa run` also satisfies the `AppKit`, `Cocoa` and
+`CoreGraphics` frameworks, so a self-contained Darwin GUI program opens a real
+SDL2 window and draws into it:
+
+```sh
+make gui
+MASA_SDK_PATH=/opt/masa/sdk ./build/masa-gui cc gui.c -framework Cocoa -o gui
+./build/masa-gui run ./gui
+```
+
+The CoreGraphics shim provides `CGRectMake`/`CGPointMake`/`CGSizeMake`, the
+`CGRectZero`/`CGPointZero`/`CGSizeZero` constants, `CGColorCreateGenericRGB`
+and the context drawing calls `CGContextSetRGBFillColor`,
+`CGContextSetRGBStrokeColor`, `CGContextFillRect`, `CGContextStrokeRect`,
+`CGContextClearRect` and `CGContextFlush`. The AppKit shim answers the
+`NSApplication` and `NSWindow` selectors a program sends through the
+Objective-C runtime - `sharedApplication`, `alloc`,
+`initWithContentRect:styleMask:backing:defer:`, `setTitle:`,
+`makeKeyAndOrderFront:`, `contentView`, `CGContext`, `setBackgroundColor:`
+and `run` - and the `NSMakeRect`/`NSMakePoint`/`NSMakeSize` helpers. `run`
+pumps SDL events and draws frames until the window is closed; a fill the
+program made before entering the loop is recorded and replayed each frame,
+so it stays visible. Set `MASA_GUI_FRAMES=<n>` to make the loop draw `n`
+frames and return (used by the test suite to run a GUI program headlessly).
+Every window, drawing context and colour is released when the run finishes,
+so a GUI program leaves nothing allocated.
+
 **Stack protector.** The stub `libSystem.tbd` exports `___stack_chk_fail`
 and `___stack_chk_guard`, and the loader provides both as shims: the guard
 is a fixed non-zero canary and a mismatch prints
@@ -870,6 +907,11 @@ MASA_FONT=/path/to/Font.ttf ./build/masa-term
 Set `MASA_BIN` if the `masa` executable is not next to `masa-term` or on
 `PATH`.
 
+`make gui` also builds `build/masa-gui`, the same `masa` with the Danroot
+AppKit/CoreGraphics SDL2 backend compiled in (`-DMASA_DANROOT_SDL2`), so
+`masa-gui run <app>` opens a window for a Darwin GUI program. See the
+"AppKit and CoreGraphics (Layer 5)" section above.
+
 On POSIX the pseudo-terminal backend is `src/pty_posix.c` (`openpty` +
 `fork`/`exec`). On Windows it is `src/pty_win.c`, which uses the Console
 Pseudo Terminal API (`CreatePseudoConsole`, `ResizePseudoConsole`,
@@ -903,6 +945,7 @@ on the build host.
 | `MASA_DANROOT_NO_BRIDGE` | `1` disables the cross-architecture bridge       |
 | `MASA_FONT`     | TrueType font `masa-term` uses (overrides discovery)   |
 | `MASA_BIN`      | `masa` executable `masa-term` runs on the PTY          |
+| `MASA_GUI_FRAMES` | `masa-gui` AppKit run loop draws `n` frames, then returns |
 | `TMPDIR`        | Preferred root for temporary directories and Cellars   |
 
 ## Layout
@@ -921,6 +964,9 @@ src/brew.c             Homebrew formula linter and builder
 src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
 src/danroot.c          Masa Danroot: the Mach-O loader (executables and
                        dylibs) behind `masa run`
+src/danroot_cf.c       clean-room CoreFoundation shim (CFString/CFArray)
+src/danroot_objc.c     clean-room Objective-C/Foundation shim (libobjc)
+src/danroot_appkit.c   clean-room AppKit/CoreGraphics over SDL2 (make gui)
 src/exec.c             init-shims, exec, shell and the shim environment
 src/doctor.c           masa doctor: local cross-build readiness report
 src/platform_posix.c   host services on POSIX (Linux, Android/Termux)
@@ -1025,7 +1071,11 @@ program's stdout, its stderr and its exact exit status are passed through; a
 second test proves the bridge falls back to the plain architecture-mismatch
 error (never a crash) when it is disabled with `MASA_DANROOT_NO_BRIDGE=1` or
 its runner path is not executable (both tests skip when the ARM64 runner or
-cross toolchain is absent, or on a non-x86_64 host).
+cross toolchain is absent, or on a non-x86_64 host). The Milestone 16 tests
+link a program that imports `CGContextFillRect` against `-framework
+CoreGraphics` and assert the plain `masa run` reports the GUI hint
+(`unresolved GUI symbol ... rebuild with 'make gui'`) rather than a bare
+unresolved symbol.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
@@ -1033,7 +1083,13 @@ same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
 through libvterm and asserts the screen buffer contains `Darwin` and `macOS`;
 it exercises the PTY resize and write paths; and it brings up the SDL2 +
 SDL2_ttf renderer under `SDL_VIDEODRIVER=dummy`, draws a frame, resizes and
-tears down with no ASan/LSan leaks.
+tears down with no ASan/LSan leaks. It also covers the Danroot AppKit backend
+(compiled into the test with `-DMASA_DANROOT_SDL2`): one test checks the
+CoreGraphics/AppKit symbol surface resolves, and an end-to-end test builds a
+Darwin GUI program with `masa cc` (an `NSWindow` filled with
+`CGContextFillRect` and an `[NSApp run]` loop), loads it through the loader
+with `MASA_GUI_FRAMES=1` under the dummy video driver, and asserts the frame
+the run loop presented contains the exact colour the program painted.
 
 A GitHub Actions workflow (`.github/workflows/ci.yml`) builds and tests with
 both `gcc` and `clang` on Linux, builds `masa-term` and runs its headless
