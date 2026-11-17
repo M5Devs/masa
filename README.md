@@ -2,7 +2,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.2.0](https://img.shields.io/badge/version-v1.2.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.3.0](https://img.shields.io/badge/version-v1.3.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -100,21 +100,26 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 
 ## Status
 
-Milestone 12 (v1.2.0): the Masa Danroot loader grows dynamic library
-support. `masa run` (aliased as `masa danroot`) now loads `MH_DYLIB` images
-alongside the `MH_EXECUTE` main image: it follows `LC_LOAD_DYLIB`,
-`LC_LOAD_WEAK_DYLIB` and `LC_REEXPORT_DYLIB` references (resolving
-`@executable_path`, `@loader_path`, `@rpath` via `LC_RPATH`, absolute paths
-and the `MASA_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` search paths), indexes each
-image's exports (`LC_DYLD_EXPORTS_TRIE`, with an `LC_SYMTAB` fallback) and
-resolves cross-image binds, so a program can call into a `masa cc -dynamiclib`
-library. `/usr/lib/libSystem.B.dylib` is never read from disk - the built-in
-`libSystem` shim satisfies it - and the shim itself gains POSIX file, string
-and process calls plus `sysctlbyname`, `uname` and `dlopen`/`dlsym`/
-`dlclose`/`dlerror`. This sits on the Milestone 11 loader core (`masa run` /
-`masa danroot` executing a Mach-O `MH_EXECUTE` binary built by `masa cc` -
-a clean-room, in-process reimplementation of the `dyld` steps a
-self-contained executable needs), the Milestone 10 distribution work
+Milestone 13 (v1.3.0): the Masa Danroot loader gains **Layer 2** - a
+proot-style virtual root plus the directory, stat and Mach shims a real
+Darwin program expects. `masa run --root <dir> <binary>` (or
+`MASA_DANROOT_ROOT=<dir>`) rewrites paths under the macOS system prefixes
+(`/Users`, `/Applications`, `/Library`, `/System`, `/opt/homebrew`,
+`/usr/local`) to live beneath `<dir>`, so a program that reads
+`/Users/me/hello.txt` or creates `/Applications/MyApp` never touches the
+host's own filesystem. The shim also gains POSIX directory and stat calls -
+`opendir`/`readdir`/`closedir` and `stat`/`lstat`/`fstat` - translating the
+host's `struct stat` and `struct dirent` into the exact 64-bit Darwin ABI
+layouts (144-byte `struct stat`, `struct dirent` with `d_name` at byte 21),
+and a clean-room Mach time/task subset (`mach_absolute_time`,
+`mach_timebase_info` reporting a 1:1 timebase, and `mach_task_self_`). The
+stub SDK grows `dirent.h`, a full `sys/stat.h`, `stdint.h` and
+`mach/mach_time.h` + `mach/mach.h`, and `libSystem.tbd` exports the new
+symbols. This sits on the Milestone 12 dynamic library loading (v1.2.0), the
+Milestone 11 loader core (`masa run` / `masa danroot` executing a Mach-O
+`MH_EXECUTE` binary built by `masa cc` - a clean-room, in-process
+reimplementation of the `dyld` steps a self-contained executable needs), the
+Milestone 10 distribution work
 (`masa pack` to `.ipa`/`.dmg`, the Homebrew single-string `system` fix), the
 Milestone 9 local independence (`masa doctor`, `make dist`, self-hosted CI,
 the Windows ConPTY backend), the Milestone 8 standalone GUI terminal
@@ -207,8 +212,9 @@ masa brew build <formula.rb> --source <dir> [--prefix <dir>]
 masa pack --ipa <App.app> -o <out.ipa>
 masa pack --dmg <App.app> -o <out.dmg>
                               Package a .app as an .ipa or a .dmg
-masa run <binary> [args...]   Run a Mach-O executable on this host
-masa danroot <binary> [args...]
+masa run [--root <dir>] <binary> [args...]
+                              Run a Mach-O executable on this host
+masa danroot [--root <dir>] <binary> [args...]
                               Alias for `masa run` (the Danroot loader)
 masa version                  Print the Masa version
 masa help                     Show the usage message
@@ -426,10 +432,14 @@ rejected by both modes.
 
 `masa sdk init-stub <dir>` writes a clean-room stub SDK: TAPI v4 `.tbd` files
 for `libSystem`, `libgcc_s.1` and the `crt1.o` / `dylib1.o` link stubs, plus
-the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `unistd.h`,
-`fcntl.h`, `dlfcn.h`, `sys/stat.h`, `sys/utsname.h`, `sys/sysctl.h`). It
+the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `stdint.h`,
+`unistd.h`, `fcntl.h`, `dlfcn.h`, `dirent.h`, `sys/stat.h`, `sys/utsname.h`,
+`sys/sysctl.h`, `mach/mach_time.h`, `mach/mach.h`). It
 contains no Apple code, and it is enough for `ld64.lld` to produce real
-`MH_EXECUTE` and `MH_DYLIB` images.
+`MH_EXECUTE` and `MH_DYLIB` images. `sys/stat.h` carries the full 64-bit
+Darwin `struct stat` and `dirent.h` the Darwin `struct dirent`, so a program
+can read `st_size`/`S_ISREG` and `readdir` results straight back from the
+Danroot shims.
 
 ```sh
 masa sdk init-stub /opt/masa/sdk
@@ -635,24 +645,52 @@ masa cc main.c -L. -lhelper -Wl,-rpath,@executable_path -o app
 masa run ./app
 ```
 
+**Virtual root (Layer 2).** A Darwin program that hard-codes `/Users/me`,
+`/Applications` or a Homebrew prefix would otherwise read or write the host's
+own filesystem. `--root <dir>` (or `MASA_DANROOT_ROOT=<dir>`) makes those
+paths relative to `<dir>`:
+
+```sh
+mkdir -p /tmp/root/Users/me
+masa run --root /tmp/root ./app
+# the program's /Users/me/hello.txt is /tmp/root/Users/me/hello.txt
+```
+
+Every file and directory shim honours the root - `fopen`, `open`, `access`,
+`stat`, `lstat`, `unlink`, `mkdir`, `rmdir`, `chdir`, `opendir` and `dlopen`.
+A path is rewritten only when it is absolute *and* begins with one of the
+macOS system prefixes (`/Users`, `/Applications`, `/Library`, `/System`,
+`/opt/homebrew`, `/usr/local`), matched as whole path components; relative
+paths and every other host path are left untouched, so ordinary Linux/Android
+I/O keeps working. The `dlopen` resolver rewrites a dylib path the same way
+before searching it.
+
 The shim covers the C symbols a program built against the stub SDK can
 reference. Standard I/O: `printf`, `fprintf`, `sprintf`, `snprintf`,
 `vsnprintf`, `sscanf`, `puts`, `putchar`, `fopen`, `fclose`, `fread`,
 `fwrite`, `fgets`, `fputs`, `fflush`, `fseek`, `ftell`, `feof`, `ferror`.
 File descriptors: `read`, `write`, `open`, `close`, `lseek`, `access`,
-`unlink`, `mkdir`, `rmdir`, `getcwd`, `chdir`. Strings and memory: `malloc`,
-`calloc`, `realloc`, `free`, `strlen`, `strcmp`, `strncmp`, `strcpy`,
-`strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`, `strdup`,
-`strndup`, `strerror`, `memcpy`, `memset`, `memmove`, `atoi`. Process and
-environment: `getenv`, `setenv`, `unsetenv`, `getpid`, `getuid`, `isatty`,
-`usleep`, `sleep`, `abort`, `exit`. Darwin system information: `uname`
-(reporting `Darwin`) and `sysctlbyname` (`kern.ostype`, `kern.osrelease`,
-`hw.machine`, `hw.ncpu`, `hw.memsize`, ...). Dynamic linker: `dlopen`,
-`dlsym`, `dlclose`, `dlerror`. A `dlopen` loads a library through the same
-path resolver and then relocates and protects the freshly mapped image, so a
-function it returns is immediately callable; `dlsym` follows the Mach-O C
-convention, prepending the leading underscore (`dlsym(h, "magic_add")` finds
-`_magic_add`), falling back to the name as given. The standard streams are exposed as data symbols (`__stdoutp`
+`unlink`, `mkdir`, `rmdir`, `getcwd`, `chdir`. Directories and stat:
+`opendir`, `readdir`, `closedir`, `stat`, `lstat`, `fstat` - the host
+structures are translated into the 64-bit Darwin ABI layouts the program was
+compiled against (a 144-byte `struct stat` with `st_size` at offset 96, and a
+`struct dirent` whose `d_name` starts at byte 21). Strings and memory:
+`malloc`, `calloc`, `realloc`, `free`, `strlen`, `strcmp`, `strncmp`,
+`strcpy`, `strncpy`, `strcat`, `strncat`, `strchr`, `strrchr`, `strstr`,
+`strdup`, `strndup`, `strerror`, `memcpy`, `memset`, `memmove`, `atoi`.
+Process and environment: `getenv`, `setenv`, `unsetenv`, `getpid`, `getuid`,
+`isatty`, `usleep`, `sleep`, `abort`, `exit`. Darwin system information:
+`uname` (reporting `Darwin`) and `sysctlbyname` (`kern.ostype`,
+`kern.osrelease`, `hw.machine`, `hw.ncpu`, `hw.memsize`, ...). Mach time and
+task: `mach_absolute_time` (host monotonic clock in nanoseconds),
+`mach_timebase_info` (a 1:1 timebase, `numer == denom == 1`) and
+`mach_task_self_` (a stable non-zero task port handle, `0x103`). Dynamic
+linker: `dlopen`, `dlsym`, `dlclose`, `dlerror`. A `dlopen` loads a library
+through the same path resolver and then relocates and protects the freshly
+mapped image, so a function it returns is immediately callable; `dlsym`
+follows the Mach-O C convention, prepending the leading underscore
+(`dlsym(h, "magic_add")` finds `_magic_add`), falling back to the name as
+given. The standard streams are exposed as data symbols (`__stdoutp`
 and friends). An `exit()` call unwinds back to the loader (so cleanup still
 runs) and its status becomes the process exit code.
 
@@ -737,6 +775,7 @@ on the build host.
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
 | `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
 | `MASA_LIBRARY_PATH` | Extra colon-separated dirs `masa run` searches for dylibs |
+| `MASA_DANROOT_ROOT` | Virtual root for `masa run` path virtualization        |
 | `MASA_FONT`     | TrueType font `masa-term` uses (overrides discovery)   |
 | `MASA_BIN`      | `masa` executable `masa-term` runs on the PTY          |
 | `TMPDIR`        | Preferred root for temporary directories and Cellars   |
@@ -828,7 +867,20 @@ reject it with an `architecture mismatch` message; and the non-Mach-O,
 missing-file and missing-argument paths are checked to exit non-zero without
 leaking. A separate test compiles every source for Android with the NDK clang
 (`ANDROID_CC`) when one is available, and skips otherwise. Tests that need
-`clang` or `make` skip themselves when the tool is absent.
+`clang` or `make` skip themselves when the tool is absent. The Milestone 12
+tests link a program against a `masa cc -dynamiclib` helper and check the
+cross-image call works, that a missing required dylib is a clear error while a
+missing weak one is skipped, that both the chained-fixups and the classic
+`LC_DYLD_INFO_ONLY` encodings bind, and that `dlsym` applies the Mach-O
+leading underscore. The Milestone 13 tests build a program that reads
+`/Users/demo/hello.txt`, creates `/Applications/MyApp`, lists `/Users/demo`
+and `stat`s a file, run it with `masa run --root <tmp>` and again with
+`MASA_DANROOT_ROOT`, and assert every operation happened inside the virtual
+root (the host's `/Applications/MyApp` never appears); a second program calls
+`mach_timebase_info` and `mach_absolute_time` twice, checking the `1:1`
+timebase, monotonic non-decreasing nanoseconds and the `0x103` task port; and
+the error paths (`stat` of a missing file under the root, `--root` with no
+directory) are checked to fail cleanly without leaking.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c

@@ -85,6 +85,8 @@ static const char *libsystem_tbd(void)
         " _strdup, _strndup, _strerror, _memcpy, _memset, _memmove, _atoi,"
         " _getenv, _setenv, _unsetenv, _getpid, _getuid, _isatty, _usleep,"
         " _sleep, _abort, _exit, _uname, _sysctlbyname,"
+        " _opendir, _readdir, _closedir, _stat, _lstat, _fstat,"
+        " _mach_absolute_time, _mach_timebase_info, _mach_task_self_,"
         " _dlopen, _dlsym, _dlclose, _dlerror,"
         " ___stdinp, ___stdoutp, ___stderrp, dyld_stub_binder ]\n"
         "...\n";
@@ -312,9 +314,102 @@ static const char *sys_stat_h(void)
         "#define S_IRUSR 0400\n"
         "#define S_IWUSR 0200\n"
         "\n"
+        "/* File-type bits, as on Darwin. */\n"
+        "#define S_IFMT  0170000\n"
+        "#define S_IFIFO 0010000\n"
+        "#define S_IFCHR 0020000\n"
+        "#define S_IFDIR 0040000\n"
+        "#define S_IFBLK 0060000\n"
+        "#define S_IFREG 0100000\n"
+        "#define S_IFLNK 0120000\n"
+        "#define S_IFSOCK 0140000\n"
+        "\n"
+        "#define S_ISREG(m)  (((m) & S_IFMT) == S_IFREG)\n"
+        "#define S_ISDIR(m)  (((m) & S_IFMT) == S_IFDIR)\n"
+        "#define S_ISLNK(m)  (((m) & S_IFMT) == S_IFLNK)\n"
+        "\n"
+        "/*\n"
+        " * The 64-bit-inode Darwin struct stat (LP64).  The shim fills this\n"
+        " * layout in directly, so a program can read st_mode, st_size and the\n"
+        " * times back without a translation layer.\n"
+        " */\n"
+        "struct timespec {\n"
+        "    long tv_sec;\n"
+        "    long tv_nsec;\n"
+        "};\n"
+        "\n"
+        "struct stat {\n"
+        "    int      st_dev;\n"
+        "    unsigned short st_mode;\n"
+        "    unsigned short st_nlink;\n"
+        "    unsigned long long st_ino;\n"
+        "    unsigned int st_uid;\n"
+        "    unsigned int st_gid;\n"
+        "    int      st_rdev;\n"
+        "    struct timespec st_atimespec;\n"
+        "    struct timespec st_mtimespec;\n"
+        "    struct timespec st_ctimespec;\n"
+        "    struct timespec st_birthtimespec;\n"
+        "    long long st_size;\n"
+        "    long long st_blocks;\n"
+        "    int      st_blksize;\n"
+        "    unsigned int st_flags;\n"
+        "    unsigned int st_gen;\n"
+        "    int      st_lspare;\n"
+        "    long long st_qspare[2];\n"
+        "};\n"
+        "\n"
+        "#define st_atime st_atimespec.tv_sec\n"
+        "#define st_mtime st_mtimespec.tv_sec\n"
+        "#define st_ctime st_ctimespec.tv_sec\n"
+        "#define st_birthtime st_birthtimespec.tv_sec\n"
+        "\n"
         "int mkdir(const char *path, int mode);\n"
+        "int stat(const char *path, struct stat *buf);\n"
+        "int lstat(const char *path, struct stat *buf);\n"
+        "int fstat(int fd, struct stat *buf);\n"
         "\n"
         "#endif /* MASA_STUB_SYS_STAT_H */\n";
+}
+
+static const char *dirent_h(void)
+{
+    return
+        "#ifndef MASA_STUB_DIRENT_H\n"
+        "#define MASA_STUB_DIRENT_H\n"
+        "\n"
+        "#ifndef NULL\n"
+        "#define NULL ((void *)0)\n"
+        "#endif\n"
+        "\n"
+        "typedef struct __masa_DIR DIR;\n"
+        "\n"
+        "/* Directory entry types, as on Darwin. */\n"
+        "#define DT_UNKNOWN 0\n"
+        "#define DT_FIFO    1\n"
+        "#define DT_CHR     2\n"
+        "#define DT_DIR     4\n"
+        "#define DT_BLK     6\n"
+        "#define DT_REG     8\n"
+        "#define DT_LNK    10\n"
+        "#define DT_SOCK   12\n"
+        "#define DT_WHT    14\n"
+        "\n"
+        "/* The 64-bit-inode Darwin struct dirent. */\n"
+        "struct dirent {\n"
+        "    unsigned long long d_ino;\n"
+        "    unsigned long long d_seekoff;\n"
+        "    unsigned short d_reclen;\n"
+        "    unsigned short d_namlen;\n"
+        "    unsigned char d_type;\n"
+        "    char d_name[1024];\n"
+        "};\n"
+        "\n"
+        "DIR *opendir(const char *path);\n"
+        "struct dirent *readdir(DIR *dirp);\n"
+        "int closedir(DIR *dirp);\n"
+        "\n"
+        "#endif /* MASA_STUB_DIRENT_H */\n";
 }
 
 static const char *sys_utsname_h(void)
@@ -383,6 +478,75 @@ static const char *dlfcn_h(void)
         "#endif /* MASA_STUB_DLFCN_H */\n";
 }
 
+static const char *stdint_h(void)
+{
+    return
+        "#ifndef MASA_STUB_STDINT_H\n"
+        "#define MASA_STUB_STDINT_H\n"
+        "\n"
+        "/* Clean-room fixed-width integer types for a 64-bit Darwin target. */\n"
+        "typedef signed char        int8_t;\n"
+        "typedef unsigned char      uint8_t;\n"
+        "typedef short              int16_t;\n"
+        "typedef unsigned short     uint16_t;\n"
+        "typedef int                int32_t;\n"
+        "typedef unsigned int       uint32_t;\n"
+        "typedef long long          int64_t;\n"
+        "typedef unsigned long long uint64_t;\n"
+        "\n"
+        "#endif /* MASA_STUB_STDINT_H */\n";
+}
+
+static const char *mach_mach_time_h(void)
+{
+    return
+        "#ifndef MASA_STUB_MACH_MACH_TIME_H\n"
+        "#define MASA_STUB_MACH_MACH_TIME_H\n"
+        "\n"
+        "#include <stdint.h>\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of <mach/mach_time.h>.  The Danroot shim reports\n"
+        " * a 1:1 timebase (numer == denom == 1) over the host monotonic clock,\n"
+        " * so mach_absolute_time() already counts nanoseconds.\n"
+        " */\n"
+        "struct mach_timebase_info {\n"
+        "    uint32_t numer;\n"
+        "    uint32_t denom;\n"
+        "};\n"
+        "typedef struct mach_timebase_info mach_timebase_info_data_t;\n"
+        "\n"
+        "uint64_t mach_absolute_time(void);\n"
+        "int mach_timebase_info(mach_timebase_info_data_t *info);\n"
+        "\n"
+        "#endif /* MASA_STUB_MACH_MACH_TIME_H */\n";
+}
+
+static const char *mach_mach_h(void)
+{
+    return
+        "#ifndef MASA_STUB_MACH_MACH_H\n"
+        "#define MASA_STUB_MACH_MACH_H\n"
+        "\n"
+        "#include <stdint.h>\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of <mach/mach.h>: just enough for a program that\n"
+        " * passes mach_task_self() around.  The port is a stable, non-zero\n"
+        " * handle the shim hands out; no Mach IPC is performed.\n"
+        " */\n"
+        "typedef uint32_t mach_port_t;\n"
+        "typedef mach_port_t task_t;\n"
+        "typedef int kern_return_t;\n"
+        "\n"
+        "#define KERN_SUCCESS 0\n"
+        "\n"
+        "extern mach_port_t mach_task_self_;\n"
+        "#define mach_task_self() mach_task_self_\n"
+        "\n"
+        "#endif /* MASA_STUB_MACH_MACH_H */\n";
+}
+
 /* ------------------------------------------------------------------ */
 /* sdk init-stub                                                      */
 /* ------------------------------------------------------------------ */
@@ -401,12 +565,16 @@ static const struct stub_file stub_files[] = {
     { "usr/include/stdlib.h", stdlib_h },
     { "usr/include/string.h", string_h },
     { "usr/include/stdio.h", stdio_h },
+    { "usr/include/stdint.h", stdint_h },
     { "usr/include/unistd.h", unistd_h },
     { "usr/include/fcntl.h", fcntl_h },
     { "usr/include/dlfcn.h", dlfcn_h },
+    { "usr/include/dirent.h", dirent_h },
     { "usr/include/sys/stat.h", sys_stat_h },
     { "usr/include/sys/utsname.h", sys_utsname_h },
-    { "usr/include/sys/sysctl.h", sys_sysctl_h }
+    { "usr/include/sys/sysctl.h", sys_sysctl_h },
+    { "usr/include/mach/mach_time.h", mach_mach_time_h },
+    { "usr/include/mach/mach.h", mach_mach_h }
 };
 
 static int sdk_init_stub(const char *dir)

@@ -349,6 +349,7 @@ static void reset_masa_env(void)
     set_env(MASA_SHIM_DIR_ENV, NULL);
     set_env(MASA_SHIM_TARGET_ENV, NULL);
     set_env(MASA_KEEP_PS1_ENV, NULL);
+    set_env(MASA_DANROOT_ROOT_ENV, NULL);
     set_env("PATH", g_original_path);
 }
 
@@ -5532,6 +5533,319 @@ static void test_pty_win_cross_compiles(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 13: Danroot Layer 2 (path virtualization, dir/stat, Mach) */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Compile a Mach-O program from a single source and return the binary
+ * path, reusing the stub SDK.  Returns 0 on success.
+ */
+static int build_macho_src(const char *dir, const char *target,
+                           const char *name, const char *source,
+                           char *exe_out, size_t exe_cap)
+{
+    char sdk[4096];
+    char src[4096];
+    char *argv[8];
+    char out[1024];
+    char err[4096];
+    int n = 0;
+    int rc;
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/%s.c", dir, name);
+    snprintf(exe_out, exe_cap, "%s/%s", dir, name);
+
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk)) {
+        fprintf(stderr, "  FAIL could not create the stub SDK\n");
+        g_failed++;
+        return -1;
+    }
+    if (write_file(src, source) != 0) {
+        fprintf(stderr, "  FAIL cannot write %s\n", src);
+        g_failed++;
+        return -1;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = exe_out;
+    argv[n] = NULL;
+
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  cc stderr (%s): %s\n", target, err);
+    }
+    return rc;
+}
+
+/*
+ * Path virtualization: a program that reads /Users/demo/hello.txt, writes
+ * /Applications/MyApp, lists /Users/demo and stats a file must only ever
+ * touch the virtual root, never the host's own /Users or /Applications.
+ */
+static void test_danroot_root_path_virtualization(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_root_XXXXXX";
+    char vroot[4096];
+    char seed[4608];
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[8];
+    struct stat st;
+    static const char *source =
+        "#include <stdio.h>\n"
+        "#include <string.h>\n"
+        "#include <sys/stat.h>\n"
+        "#include <dirent.h>\n"
+        "#include <unistd.h>\n"
+        "int main(void) {\n"
+        "    FILE *f = fopen(\"/Users/demo/hello.txt\", \"r\");\n"
+        "    char buf[64];\n"
+        "    if (f == NULL) { printf(\"open-fail\\n\"); return 1; }\n"
+        "    fgets(buf, sizeof(buf), f);\n"
+        "    fclose(f);\n"
+        "    printf(\"read=%s\", buf);\n"
+        "    struct stat st;\n"
+        "    if (stat(\"/Users/demo/hello.txt\", &st) == 0)\n"
+        "        printf(\"size=%lld isreg=%d\\n\", st.st_size,"
+        " S_ISREG(st.st_mode));\n"
+        "    else printf(\"stat-fail\\n\");\n"
+        "    mkdir(\"/Applications/MyApp\", 0755);\n"
+        "    struct stat ad;\n"
+        "    if (stat(\"/Applications/MyApp\", &ad) == 0)\n"
+        "        printf(\"appdir=%d\\n\", S_ISDIR(ad.st_mode));\n"
+        "    DIR *d = opendir(\"/Users/demo\");\n"
+        "    struct dirent *e; int n = 0;\n"
+        "    if (d != NULL) {\n"
+        "        while ((e = readdir(d)) != NULL)\n"
+        "            if (e->d_name[0] != '.') n++;\n"
+        "        closedir(d);\n"
+        "    }\n"
+        "    printf(\"entries=%d\\n\", n);\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    if (build_macho_src(dir, target, "vp", source, exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* Lay out the virtual root: /Users/demo with a seed file, and the
+     * /Applications parent that the program will create inside. */
+    snprintf(vroot, sizeof(vroot), "%s/root", dir);
+    snprintf(seed, sizeof(seed), "%s/Users/demo", vroot);
+    if (masa_mkdir_p(seed) != 0) {
+        fprintf(stderr, "  FAIL cannot create %s\n", seed);
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    snprintf(seed, sizeof(seed), "%s/Applications", vroot);
+    if (masa_mkdir_p(seed) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    snprintf(seed, sizeof(seed), "%s/Users/demo/hello.txt", vroot);
+    if (write_file(seed, "hi\n") != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* Run with `--root <vroot>`. */
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = "--root";
+    argv[3] = vroot;
+    argv[4] = exe;
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "read=hi");
+    CHECK_CONTAINS(out, "size=3 isreg=1");
+    CHECK_CONTAINS(out, "appdir=1");
+    CHECK_CONTAINS(out, "entries=1");
+
+    /* The mkdir must have landed inside the root, not on the host. */
+    snprintf(seed, sizeof(seed), "%s/Applications/MyApp", vroot);
+    CHECK(stat(seed, &st) == 0 && S_ISDIR(st.st_mode));
+    CHECK(stat("/Applications/MyApp", &st) != 0);
+
+    /* MASA_DANROOT_ROOT selects the same root without --root. */
+    set_env(MASA_DANROOT_ROOT_ENV, vroot);
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "read=hi");
+    set_env(MASA_DANROOT_ROOT_ENV, NULL);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * Mach time: mach_timebase_info reports 1:1 and mach_absolute_time is
+ * monotonic non-decreasing; mach_task_self is a stable non-zero port.
+ */
+static void test_danroot_mach_time(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_mach_XXXXXX";
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *source =
+        "#include <mach/mach_time.h>\n"
+        "#include <mach/mach.h>\n"
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    mach_timebase_info_data_t tb;\n"
+        "    mach_timebase_info(&tb);\n"
+        "    printf(\"numer=%u denom=%u\\n\", tb.numer, tb.denom);\n"
+        "    uint64_t a = mach_absolute_time();\n"
+        "    uint64_t b = mach_absolute_time();\n"
+        "    printf(\"mono=%d\\n\", b >= a);\n"
+        "    printf(\"task=%u\\n\", (unsigned)mach_task_self());\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    if (build_macho_src(dir, target, "mt", source, exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "numer=1 denom=1");
+    CHECK_CONTAINS(out, "mono=1");
+    CHECK_CONTAINS(out, "task=259"); /* 0x103 */
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
+ * Error paths: a missing virtual-root file fails cleanly, --root without a
+ * directory is a usage error, and an unreadable image still reports a
+ * clear message - all without leaking.
+ */
+static void test_danroot_root_error_paths(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_rooterr_XXXXXX";
+    char vroot[4096];
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[8];
+    static const char *source =
+        "#include <stdio.h>\n"
+        "#include <sys/stat.h>\n"
+        "int main(void) {\n"
+        "    struct stat st;\n"
+        "    if (stat(\"/Users/nobody/missing.txt\", &st) != 0)\n"
+        "        printf(\"missing-ok\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    if (build_macho_src(dir, target, "err", source, exe, sizeof(exe)) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    snprintf(vroot, sizeof(vroot), "%s/root", dir);
+    if (masa_mkdir_p(vroot) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    /* A stat of a file that does not exist under the root returns -1. */
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = "--root";
+    argv[3] = vroot;
+    argv[4] = exe;
+    argv[5] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "missing-ok");
+
+    /* `--root` with no directory is a usage error. */
+    argv[2] = "--root";
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 2);
+    CHECK_CONTAINS(err, "--root requires a directory");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -5631,6 +5945,10 @@ int main(void)
     RUN(test_run_dylib_via_library_path);
     RUN(test_run_rejects_cputype_mismatch);
     RUN(test_run_rejects_bad_input);
+
+    RUN(test_danroot_root_path_virtualization);
+    RUN(test_danroot_mach_time);
+    RUN(test_danroot_root_error_paths);
 
     RUN(test_cc_compiles_macho_object);
     RUN(test_cc_x86_64_macho_object);

@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.2.0"
+#define MASA_VERSION "1.3.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -64,6 +64,10 @@ extern "C" {
 /* Extra directories the Danroot loader searches for `@rpath`/bare dylib
  * names, ahead of DYLD_LIBRARY_PATH.  Colon-separated. */
 #define MASA_LIBRARY_PATH_ENV "MASA_LIBRARY_PATH"
+/* Virtual root for the Danroot loader's `--root` path virtualization: when
+ * set (or passed as `--root <dir>`), paths under the macOS system prefixes
+ * are mapped beneath this directory instead of the host root. */
+#define MASA_DANROOT_ROOT_ENV "MASA_DANROOT_ROOT"
 
 /* Exit status returned when the wrapper cannot spawn a tool at all. */
 #define MASA_EXIT_SPAWN_ERROR 127

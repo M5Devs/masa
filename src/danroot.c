@@ -36,6 +36,8 @@
 
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+/* Exposes struct dirent.d_type, which the directory shim reads. */
+#define _DEFAULT_SOURCE 1
 #endif
 
 #include "masa.h"
@@ -63,6 +65,7 @@ int masa_danroot_main(int argc, char *const argv[])
 
 #else /* !_WIN32 */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
@@ -277,6 +280,173 @@ static int64_t dr_sleb128(const unsigned char **p, const unsigned char *end)
 }
 
 /* ------------------------------------------------------------------ */
+/* Path virtualization (`--root` / MASA_DANROOT_ROOT)                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A proot-style virtual root.  When active, an absolute path that names a
+ * macOS system location - a per-user home directory, an application bundle
+ * directory, the shared libraries and the Homebrew prefixes - is rewritten
+ * to live beneath the virtual root, so a program that expects to write
+ * /Applications/MyApp or read /Users/me/hello.txt only ever touches files
+ * under <root>.  Host paths outside those prefixes (and every relative
+ * path) are left exactly as they are, so ordinary Linux/Android I/O keeps
+ * working.
+ */
+
+static char dr_root[DR_PATH_MAX];
+static int dr_root_active;
+
+/* macOS locations a Masa-linked program may reference by their Darwin
+ * path.  Each entry is matched as one or more whole path components, so
+ * "/Users" never captures "/Usersomething". */
+static const char *const dr_root_prefixes[] = {
+    "/Users",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/opt/homebrew",
+    "/usr/local",
+    NULL
+};
+
+static void dr_root_set(const char *dir)
+{
+    size_t len;
+
+    if (dir == NULL || dir[0] == '\0') {
+        dr_root_active = 0;
+        dr_root[0] = '\0';
+        return;
+    }
+    dr_strlcpy(dr_root, dir, sizeof(dr_root));
+    len = strlen(dr_root);
+    while (len > 1 && dr_root[len - 1] == '/') {
+        dr_root[--len] = '\0';
+    }
+    dr_root_active = 1;
+}
+
+/*
+ * Translate a program-supplied path for the host.  When no virtual root is
+ * active, a relative path, or a path outside the macOS prefixes, the input
+ * pointer is returned unchanged.  Otherwise the rewritten path is written
+ * to buf and returned; NULL (with errno set) means the rewrite overflowed.
+ */
+static const char *dr_vpath(const char *path, char *buf, size_t cap)
+{
+    size_t i;
+
+    if (!dr_root_active || path == NULL || path[0] != '/') {
+        return path;
+    }
+    for (i = 0; dr_root_prefixes[i] != NULL; i++) {
+        size_t plen = strlen(dr_root_prefixes[i]);
+
+        if (strncmp(path, dr_root_prefixes[i], plen) != 0) {
+            continue;
+        }
+        if (path[plen] != '\0' && path[plen] != '/') {
+            continue; /* a different component, e.g. /Usersfoo */
+        }
+        /* Keep the whole Darwin path beneath the root. */
+        if (dr_pathfmt(buf, cap, "%s%s", dr_root, path) >= (int)cap) {
+            errno = ENAMETOOLONG;
+            return NULL;
+        }
+        return buf;
+    }
+    return path;
+}
+
+/* ------------------------------------------------------------------ */
+/* Darwin ABI views of the host structures the shims translate         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The target is a 64-bit Darwin process, so the structures it reads back
+ * must use the LP64 Darwin layout, not the host's.  These are written out
+ * from the documented XNU ABI (sys/stat.h, sys/dirent.h), not copied from
+ * any SDK header.
+ */
+struct dr_timespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+struct dr_darwin_stat {
+    int32_t  st_dev;
+    uint16_t st_mode;
+    uint16_t st_nlink;
+    uint64_t st_ino;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    int32_t  st_rdev;
+    struct dr_timespec st_atimespec;
+    struct dr_timespec st_mtimespec;
+    struct dr_timespec st_ctimespec;
+    struct dr_timespec st_birthtimespec;
+    int64_t  st_size;
+    int64_t  st_blocks;
+    int32_t  st_blksize;
+    uint32_t st_flags;
+    uint32_t st_gen;
+    int32_t  st_lspare;
+    int64_t  st_qspare[2];
+};
+
+/* Darwin's 64-bit-inode struct dirent: d_name begins at byte 21. */
+struct dr_darwin_dirent {
+    uint64_t d_ino;
+    uint64_t d_seekoff;
+    uint16_t d_reclen;
+    uint16_t d_namlen;
+    uint8_t  d_type;
+    char     d_name[1024];
+};
+
+/*
+ * These layouts are the whole contract with the loaded program: a wrong
+ * size or offset would silently corrupt every stat()/readdir() result.
+ * The numbers are the documented 64-bit Darwin ABI (144-byte struct stat,
+ * st_size at 96; struct dirent with d_name at 21).
+ */
+#if defined(__x86_64__) || defined(__aarch64__)
+_Static_assert(sizeof(struct dr_darwin_stat) == 144, "Darwin struct stat");
+_Static_assert(offsetof(struct dr_darwin_stat, st_size) == 96,
+               "Darwin st_size offset");
+_Static_assert(offsetof(struct dr_darwin_stat, st_mode) == 4,
+               "Darwin st_mode offset");
+_Static_assert(offsetof(struct dr_darwin_dirent, d_name) == 21,
+               "Darwin d_name offset");
+_Static_assert(offsetof(struct dr_darwin_dirent, d_type) == 20,
+               "Darwin d_type offset");
+#endif
+
+static void dr_stat_to_darwin(const struct stat *h, struct dr_darwin_stat *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->st_dev = (int32_t)h->st_dev;
+    d->st_mode = (uint16_t)h->st_mode;
+    d->st_nlink = (uint16_t)h->st_nlink;
+    d->st_ino = (uint64_t)h->st_ino;
+    d->st_uid = (uint32_t)h->st_uid;
+    d->st_gid = (uint32_t)h->st_gid;
+    d->st_rdev = (int32_t)h->st_rdev;
+    d->st_atimespec.tv_sec = (int64_t)h->st_atim.tv_sec;
+    d->st_atimespec.tv_nsec = (int64_t)h->st_atim.tv_nsec;
+    d->st_mtimespec.tv_sec = (int64_t)h->st_mtim.tv_sec;
+    d->st_mtimespec.tv_nsec = (int64_t)h->st_mtim.tv_nsec;
+    d->st_ctimespec.tv_sec = (int64_t)h->st_ctim.tv_sec;
+    d->st_ctimespec.tv_nsec = (int64_t)h->st_ctim.tv_nsec;
+    /* The host has no creation time; reuse the change time. */
+    d->st_birthtimespec = d->st_ctimespec;
+    d->st_size = (int64_t)h->st_size;
+    d->st_blocks = (int64_t)h->st_blocks;
+    d->st_blksize = (int32_t)h->st_blksize;
+}
+
+/* ------------------------------------------------------------------ */
 /* Clean-room libSystem shim                                          */
 /* ------------------------------------------------------------------ */
 
@@ -322,7 +492,13 @@ static int dr_shim_fprintf(void *stream, const char *format, ...)
 
 static void *dr_shim_fopen(const char *path, const char *mode)
 {
-    return fopen(path, mode);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return NULL;
+    }
+    return fopen(p, mode);
 }
 
 static int dr_shim_fclose(void *stream)
@@ -429,7 +605,13 @@ static long dr_shim_read(int fd, void *buf, size_t n)
 
 static int dr_shim_open(const char *path, int flags, int mode)
 {
-    return open(path, flags, mode);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return open(p, flags, mode);
 }
 
 static int dr_shim_close(int fd)
@@ -444,22 +626,46 @@ static int64_t dr_shim_lseek(int fd, int64_t offset, int whence)
 
 static int dr_shim_access(const char *path, int mode)
 {
-    return access(path, mode);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return access(p, mode);
 }
 
 static int dr_shim_unlink(const char *path)
 {
-    return unlink(path);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return unlink(p);
 }
 
 static int dr_shim_mkdir(const char *path, int mode)
 {
-    return mkdir(path, (mode_t)mode);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return mkdir(p, (mode_t)mode);
 }
 
 static int dr_shim_rmdir(const char *path)
 {
-    return rmdir(path);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return rmdir(p);
 }
 
 static char *dr_shim_getcwd(char *buf, size_t size)
@@ -469,7 +675,103 @@ static char *dr_shim_getcwd(char *buf, size_t size)
 
 static int dr_shim_chdir(const char *path)
 {
-    return chdir(path);
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return -1;
+    }
+    return chdir(p);
+}
+
+/* --- directories and stat ----------------------------------------- */
+
+static void *dr_shim_opendir(const char *path)
+{
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+
+    if (p == NULL) {
+        return NULL;
+    }
+    return opendir(p);
+}
+
+/*
+ * readdir hands the program a Darwin struct dirent.  The host entry is
+ * copied into an internal buffer with the fields laid out for a 64-bit
+ * Darwin process, so the program reads the correct inode, type and name.
+ */
+static void *dr_shim_readdir(void *dirp)
+{
+    static struct dr_darwin_dirent out;
+    struct dirent *ent = readdir((DIR *)dirp);
+    size_t namlen;
+
+    if (ent == NULL) {
+        return NULL;
+    }
+    namlen = strlen(ent->d_name);
+    if (namlen > sizeof(out.d_name) - 1) {
+        namlen = sizeof(out.d_name) - 1;
+    }
+    memset(&out, 0, sizeof(out));
+    out.d_ino = (uint64_t)ent->d_ino;
+    out.d_seekoff = 0;
+    out.d_namlen = (uint16_t)namlen;
+    out.d_reclen = (uint16_t)(sizeof(out) - sizeof(out.d_name) + namlen + 1);
+    out.d_type = (uint8_t)ent->d_type;
+    memcpy(out.d_name, ent->d_name, namlen);
+    out.d_name[namlen] = '\0';
+    return &out;
+}
+
+static int dr_shim_closedir(void *dirp)
+{
+    return closedir((DIR *)dirp);
+}
+
+static int dr_shim_stat(const char *path, void *buf)
+{
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+    struct stat h;
+
+    if (p == NULL) {
+        return -1;
+    }
+    if (stat(p, &h) != 0) {
+        return -1;
+    }
+    dr_stat_to_darwin(&h, (struct dr_darwin_stat *)buf);
+    return 0;
+}
+
+static int dr_shim_lstat(const char *path, void *buf)
+{
+    char vbuf[DR_PATH_MAX];
+    const char *p = dr_vpath(path, vbuf, sizeof(vbuf));
+    struct stat h;
+
+    if (p == NULL) {
+        return -1;
+    }
+    if (lstat(p, &h) != 0) {
+        return -1;
+    }
+    dr_stat_to_darwin(&h, (struct dr_darwin_stat *)buf);
+    return 0;
+}
+
+static int dr_shim_fstat(int fd, void *buf)
+{
+    struct stat h;
+
+    if (fstat(fd, &h) != 0) {
+        return -1;
+    }
+    dr_stat_to_darwin(&h, (struct dr_darwin_stat *)buf);
+    return 0;
 }
 
 /* --- strings, memory and formatting ------------------------------- */
@@ -769,6 +1071,41 @@ static int dr_shim_sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
     return -1;
 }
 
+/* --- Mach time and task ------------------------------------------- */
+
+/*
+ * A minimal clean-room subset of <mach/mach_time.h> and <mach/mach.h>.
+ * The host monotonic clock is the natural source for mach_absolute_time;
+ * the timebase is 1:1 (nanoseconds), which is what Apple silicon reports.
+ * mach_task_self_ only has to be a stable, non-zero task port handle.
+ */
+static uint32_t dr_mach_task_self = 0x103u;
+
+static uint64_t dr_shim_mach_absolute_time(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int dr_shim_mach_timebase_info(void *info)
+{
+    struct {
+        uint32_t numer;
+        uint32_t denom;
+    } *tb = (void *)info;
+
+    if (tb == NULL) {
+        return -1;
+    }
+    tb->numer = 1;
+    tb->denom = 1;
+    return 0;
+}
+
 /* --- dynamic linker (wired into the loader below) ----------------- */
 
 static void *dr_dlopen(const char *path, int mode);
@@ -816,6 +1153,13 @@ static const struct dr_symbol dr_symbols[] = {
     { "_rmdir",             (void *)dr_shim_rmdir },
     { "_getcwd",            (void *)dr_shim_getcwd },
     { "_chdir",             (void *)dr_shim_chdir },
+    /* directories and stat */
+    { "_opendir",           (void *)dr_shim_opendir },
+    { "_readdir",           (void *)dr_shim_readdir },
+    { "_closedir",          (void *)dr_shim_closedir },
+    { "_stat",              (void *)dr_shim_stat },
+    { "_lstat",             (void *)dr_shim_lstat },
+    { "_fstat",             (void *)dr_shim_fstat },
     /* strings and memory */
     { "_malloc",            (void *)dr_shim_malloc },
     { "_calloc",            (void *)dr_shim_calloc },
@@ -852,6 +1196,9 @@ static const struct dr_symbol dr_symbols[] = {
     /* Darwin system information */
     { "_uname",             (void *)dr_shim_uname },
     { "_sysctlbyname",      (void *)dr_shim_sysctlbyname },
+    /* Mach time and task */
+    { "_mach_absolute_time",  (void *)dr_shim_mach_absolute_time },
+    { "_mach_timebase_info",  (void *)dr_shim_mach_timebase_info },
     /* dynamic linker */
     { "_dlopen",            (void *)dr_dlopen },
     { "_dlsym",             (void *)dr_dlsym },
@@ -861,6 +1208,8 @@ static const struct dr_symbol dr_symbols[] = {
     { "___stdinp",          (void *)&stdin },
     { "___stdoutp",         (void *)&stdout },
     { "___stderrp",         (void *)&stderr },
+    /* mach_task_self_ is a data symbol: the program reads its value. */
+    { "_mach_task_self_",   (void *)&dr_mach_task_self },
     { "dyld_stub_binder",   (void *)dr_shim_stub_binder },
     { NULL, NULL }
 };
@@ -2576,12 +2925,43 @@ done:
 
 int masa_danroot_main(int argc, char *const argv[])
 {
-    if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
+    const char *root = NULL;
+    int i = 0;
+
+    /*
+     * Options come before the image: `masa run --root <dir> <binary> ...`.
+     * A `--root` on the command line wins over MASA_DANROOT_ROOT.  The
+     * image path and everything after it are the program's own arguments.
+     */
+    while (i < argc && argv[i] != NULL) {
+        if (strcmp(argv[i], "--root") == 0) {
+            if (i + 1 >= argc || argv[i + 1] == NULL) {
+                fprintf(stderr, "masa: run: --root requires a directory\n");
+                return 2;
+            }
+            root = argv[i + 1];
+            i += 2;
+            continue;
+        }
+        if (strncmp(argv[i], "--root=", 7) == 0) {
+            root = argv[i] + 7;
+            i += 1;
+            continue;
+        }
+        break;
+    }
+
+    if (root == NULL) {
+        root = getenv(MASA_DANROOT_ROOT_ENV);
+    }
+    dr_root_set(root);
+
+    if (i >= argc || argv[i] == NULL || argv[i][0] == '\0') {
         fprintf(stderr, "masa: run: missing Mach-O executable\n");
         return 2;
     }
-    /* argv[0] is the image path; the loaded program gets argv verbatim. */
-    return dr_run(argv[0], argc, argv);
+    /* argv[i] is the image path; the loaded program gets the rest verbatim. */
+    return dr_run(argv[i], argc - i, &argv[i]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2603,12 +2983,18 @@ static void *dr_dlopen(const char *path, int mode)
     }
     err[0] = '\0';
     {
+        char vbuf[DR_PATH_MAX];
         char resolved[DR_PATH_MAX];
+        const char *vpath;
         struct dr_module *m;
         int before;
         int i;
 
-        if (dr_resolve_dylib_path(ld, NULL, path, resolved, sizeof(resolved))
+        vpath = dr_vpath(path, vbuf, sizeof(vbuf));
+        if (vpath == NULL) {
+            return NULL;
+        }
+        if (dr_resolve_dylib_path(ld, NULL, vpath, resolved, sizeof(resolved))
             != 0) {
             return NULL;
         }
