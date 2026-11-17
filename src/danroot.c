@@ -2605,35 +2605,90 @@ static void *dr_dlopen(const char *path, int mode)
     {
         char resolved[DR_PATH_MAX];
         struct dr_module *m;
+        int before;
+        int i;
 
         if (dr_resolve_dylib_path(ld, NULL, path, resolved, sizeof(resolved))
             != 0) {
             return NULL;
         }
+        before = ld->mod_count;
         m = dr_find_loaded(ld, resolved);
         if (m == NULL) {
             m = dr_load_module(ld, resolved, 0, err, sizeof(err));
+            if (m == NULL) {
+                return NULL;
+            }
+        }
+        /*
+         * A module pulled in here (with its dependencies) is mapped but not
+         * yet relocated: dr_run only fixes and protects the images known at
+         * startup.  Finish every newly registered module so a function
+         * returned by dlsym is callable.
+         */
+        for (i = before; i < ld->mod_count; i++) {
+            if (dr_module_fixups(ld, ld->mods[i], DR_FIX_REBASE, err,
+                                 sizeof(err)) != 0 ||
+                dr_module_fixups(ld, ld->mods[i], DR_FIX_BIND, err,
+                                 sizeof(err)) != 0 ||
+                dr_protect_module(ld->mods[i], err, sizeof(err)) != 0) {
+                return NULL;
+            }
         }
         return (void *)m;
     }
+}
+
+/*
+ * Resolve a dlsym name the way dyld does.  Mach-O C symbols carry a
+ * leading underscore, so dlsym(handle, "malloc") must find "_malloc":
+ * try the name as given, then with a leading underscore prepended (and
+ * the other way round when the caller already supplied one).
+ */
+static void *dr_dlsym_lookup(struct dr_loader *ld, struct dr_module *m,
+                             const char *name)
+{
+    char underscored[1024];
+    const char *candidates[2];
+    int i;
+
+    if (name[0] == '_') {
+        candidates[0] = name;
+        candidates[1] = name + 1;
+    } else {
+        (void)dr_pathfmt(underscored, sizeof(underscored), "_%s", name);
+        candidates[0] = underscored;
+        candidates[1] = name;
+    }
+    for (i = 0; i < 2; i++) {
+        void *p;
+
+        if (candidates[i] == NULL || candidates[i][0] == '\0') {
+            continue;
+        }
+        if (m != NULL) {
+            p = dr_module_export(m, candidates[i]);
+            if (p != NULL) {
+                return p;
+            }
+        }
+        p = dr_resolve_symbol(ld, candidates[i]);
+        if (p != NULL) {
+            return p;
+        }
+    }
+    return NULL;
 }
 
 static void *dr_dlsym(void *handle, const char *name)
 {
     struct dr_loader *ld = dr_active_loader;
     struct dr_module *m = (struct dr_module *)handle;
-    void *p;
 
     if (name == NULL || ld == NULL) {
         return NULL;
     }
-    if (m != NULL) {
-        p = dr_module_export(m, name);
-        if (p != NULL) {
-            return p;
-        }
-    }
-    return dr_resolve_symbol(ld, name);
+    return dr_dlsym_lookup(ld, m, name);
 }
 
 static int dr_dlclose(void *handle)

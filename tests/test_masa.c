@@ -4433,6 +4433,109 @@ static void test_run_weak_dylib_classic_dyld_info(void)
 }
 
 /*
+ * dlsym must apply the Mach-O leading-underscore convention: a caller asks
+ * for the C name ("magic_add") but the symbol is stored as "_magic_add".
+ * The dylib is loaded only at runtime (not linked in), so dlopen must also
+ * relocate and protect the freshly mapped image before its functions run.
+ */
+static void test_run_dlopen_dlsym_underscore(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_dlsym_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[4];
+    static const char *lib_src =
+        "int magic_add(int a, int b) { return a + b; }\n";
+    static const char *main_src =
+        "#include <stdio.h>\n"
+        "#include <dlfcn.h>\n"
+        "int main(void) {\n"
+        "    void *h = dlopen(\"@executable_path/libmagic.dylib\", RTLD_NOW);\n"
+        "    if (h == NULL) { printf(\"dlopen-fail\\n\"); return 1; }\n"
+        "    void *p = dlsym(h, \"magic_add\");\n"
+        "    if (p == NULL) { printf(\"dlsym-null\\n\"); return 2; }\n"
+        "    int (*f)(int, int) = (int (*)(int, int))p;\n"
+        "    printf(\"magic=%d\\n\", f(3, 4));\n"
+        "    return 0;\n"
+        "}\n";
+    int rc;
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    /* Build the runtime-only dylib. */
+    if (build_dylib(dir, target, lib_src, "magic") != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/main.c", dir);
+    snprintf(exe, sizeof(exe), "%s/app", dir);
+    reset_masa_env();
+    if (write_file(src, main_src) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    /* The dylib is NOT linked in; only -rpath is set for the dlopen call. */
+    {
+        char rpath[4200];
+        char *cargv[8];
+        char o[1024];
+        char e[4096];
+        int n = 0;
+
+        snprintf(rpath, sizeof(rpath), "-Wl,-rpath,@executable_path");
+        cargv[n++] = "masa";
+        cargv[n++] = "cc";
+        cargv[n++] = src;
+        cargv[n++] = "-o";
+        cargv[n++] = exe;
+        cargv[n++] = rpath;
+        cargv[n] = NULL;
+        if (run_masa(cargv, o, sizeof(o), e, sizeof(e)) != 0) {
+            fprintf(stderr, "  exe cc stderr: %s\n", e);
+            g_failed++;
+            remove_tree(dir);
+            reset_masa_env();
+            return;
+        }
+    }
+
+    argv[0] = "masa";
+    argv[1] = "run";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  run stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "magic=7");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
  * A missing (non-weak) dylib must fail the load with a clear message and
  * leave no leaks: the loader unwinds every mapping and allocation.
  */
@@ -5524,6 +5627,7 @@ int main(void)
     RUN(test_run_missing_dylib_reports_error);
     RUN(test_run_weak_dylib_optional);
     RUN(test_run_weak_dylib_classic_dyld_info);
+    RUN(test_run_dlopen_dlsym_underscore);
     RUN(test_run_dylib_via_library_path);
     RUN(test_run_rejects_cputype_mismatch);
     RUN(test_run_rejects_bad_input);

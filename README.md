@@ -648,8 +648,11 @@ environment: `getenv`, `setenv`, `unsetenv`, `getpid`, `getuid`, `isatty`,
 `usleep`, `sleep`, `abort`, `exit`. Darwin system information: `uname`
 (reporting `Darwin`) and `sysctlbyname` (`kern.ostype`, `kern.osrelease`,
 `hw.machine`, `hw.ncpu`, `hw.memsize`, ...). Dynamic linker: `dlopen`,
-`dlsym`, `dlclose`, `dlerror` (a `dlopen` loads a library through the same
-resolver). The standard streams are exposed as data symbols (`__stdoutp`
+`dlsym`, `dlclose`, `dlerror`. A `dlopen` loads a library through the same
+path resolver and then relocates and protects the freshly mapped image, so a
+function it returns is immediately callable; `dlsym` follows the Mach-O C
+convention, prepending the leading underscore (`dlsym(h, "magic_add")` finds
+`_magic_add`), falling back to the name as given. The standard streams are exposed as data symbols (`__stdoutp`
 and friends). An `exit()` call unwinds back to the loader (so cleanup still
 runs) and its status becomes the process exit code.
 
