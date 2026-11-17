@@ -342,6 +342,168 @@ static void test_gui_main_headless(void)
     free(masa);
 }
 
+static void test_gui_tabs(void)
+{
+    struct masa_gui *gui;
+    char err[256];
+
+    printf("[ RUN  ] test_gui_tabs\n");
+
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    err[0] = '\0';
+    gui = masa_gui_init("masa", 640, 400, err, sizeof(err));
+    if (gui == NULL) {
+        printf("  SKIP SDL init failed: %s\n", err[0] ? err : "?");
+        g_skipped++;
+        return;
+    }
+
+    /* init() opens exactly one tab. */
+    CHECK(masa_gui_tab_count(gui) == 1);
+    CHECK(masa_gui_tab_active(gui) == 0);
+    CHECK(strcmp(masa_gui_tab_title(gui, 0), "") == 0);
+
+    /* Each new tab becomes active and gets its own screen. */
+    CHECK(masa_gui_tab_new(gui) == 1);
+    CHECK(masa_gui_tab_count(gui) == 2);
+    CHECK(masa_gui_tab_active(gui) == 1);
+    CHECK(masa_gui_tab_new(gui) == 2);
+    CHECK(masa_gui_tab_count(gui) == 3);
+
+    /* Feed each tab distinct text and confirm the screens are independent. */
+    {
+        char text[2048];
+
+        masa_gui_tab_select(gui, 0);
+        masa_gui_tab_feed(gui, 0, "tab zero\r\n", 10);
+        masa_gui_tab_feed(gui, 1, "tab one\r\n", 9);
+        masa_gui_tab_select(gui, 0);
+        masa_gui_screen_text(gui, text, sizeof(text));
+        CHECK_CONTAINS(text, "tab zero");
+        masa_gui_tab_select(gui, 1);
+        masa_gui_screen_text(gui, text, sizeof(text));
+        CHECK_CONTAINS(text, "tab one");
+        CHECK(strstr(text, "tab zero") == NULL);
+    }
+
+    /* Selecting a bad index is refused. */
+    CHECK(masa_gui_tab_select(gui, 9) == -1);
+
+    /* Closing reindexes and keeps the active tab valid. */
+    CHECK(masa_gui_tab_close(gui, 0) == 2);
+    CHECK(masa_gui_tab_count(gui) == 2);
+    CHECK(masa_gui_tab_active(gui) >= 0);
+
+    /* Hit testing maps pixels to tabs. */
+    CHECK(masa_gui_tab_at(gui, 10, 30 + 13) == 0);
+    CHECK(masa_gui_tab_at(gui, 150 + 10, 30 + 13) == 1);
+    CHECK(masa_gui_tab_at(gui, 10, 2) == -1);      /* header, not tabs */
+    CHECK(masa_gui_tab_at(gui, 900, 30 + 13) == -1); /* past the last tab */
+
+    masa_gui_shutdown(gui);
+}
+
+static void test_gui_scrollback(void)
+{
+    struct masa_gui *gui;
+    char err[256];
+    char line[512];
+    int i;
+    int count;
+
+    printf("[ RUN  ] test_gui_scrollback\n");
+
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    err[0] = '\0';
+    gui = masa_gui_init("masa", 640, 400, err, sizeof(err));
+    if (gui == NULL) {
+        printf("  SKIP SDL init failed: %s\n", err[0] ? err : "?");
+        g_skipped++;
+        return;
+    }
+
+    CHECK(masa_gui_scrollback_count(gui) == 0);
+
+    /* Push far more lines than the screen holds so history accumulates. */
+    for (i = 0; i < 200; i++) {
+        char buf[64];
+
+        snprintf(buf, sizeof(buf), "history line %d\r\n", i);
+        masa_gui_feed(gui, buf, strlen(buf));
+    }
+
+    count = masa_gui_scrollback_count(gui);
+    CHECK(count > 0);
+
+    /*
+     * Lines still on the live screen have not scrolled off yet, so the
+     * oldest retained line is the very first one fed and the newest
+     * retained line is (fed - rows).  Index 0 is always the oldest.
+     */
+    if (count > 0) {
+        CHECK(masa_gui_scrollback_line(gui, 0, line, sizeof(line)) > 0);
+        CHECK_CONTAINS(line, "history line 0");
+        CHECK(masa_gui_scrollback_line(gui, count - 1, line,
+                                       sizeof(line)) > 0);
+        CHECK_CONTAINS(line, "history line ");
+    }
+
+    /* Scrolling clamps to the retained range and reset returns to live. */
+    CHECK(masa_gui_scroll(gui, 5) == 5);
+    CHECK(masa_gui_scroll_offset(gui) == 5);
+    CHECK(masa_gui_scroll(gui, -100) == 0);
+    masa_gui_scroll(gui, 10);
+    masa_gui_scroll_reset(gui);
+    CHECK(masa_gui_scroll_offset(gui) == 0);
+
+    /* The bounded ring never exceeds the cap. */
+    CHECK(count <= MASA_GUI_SCROLLBACK);
+
+    masa_gui_shutdown(gui);
+}
+
+static void test_gui_clipboard(void)
+{
+    struct masa_gui *gui;
+    char err[256];
+    char out[256];
+    char sel[512];
+    size_t n;
+
+    printf("[ RUN  ] test_gui_clipboard\n");
+
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    err[0] = '\0';
+    gui = masa_gui_init("masa", 640, 400, err, sizeof(err));
+    if (gui == NULL) {
+        printf("  SKIP SDL init failed: %s\n", err[0] ? err : "?");
+        g_skipped++;
+        return;
+    }
+
+    masa_gui_feed(gui, "copy this text\r\n", 16);
+
+    /* No selection yet -> nothing to copy. */
+    CHECK(masa_gui_copy_selection(gui, sel, sizeof(sel)) == 0);
+
+    /* Select the first row and copy it. */
+    masa_gui_set_selection(gui, 0, 0, 0, 13);
+    n = masa_gui_copy_selection(gui, sel, sizeof(sel));
+    CHECK(n > 0);
+    CHECK_CONTAINS(sel, "copy this text");
+
+    masa_gui_clear_selection(gui);
+    CHECK(masa_gui_copy_selection(gui, sel, sizeof(sel)) == 0);
+
+    /* Paste translates text (and a newline) into child input. */
+    n = masa_gui_paste(gui, "pasted\r\n", out, sizeof(out));
+    CHECK(n > 0);
+    CHECK_CONTAINS(out, "pasted");
+    CHECK(strchr(out, '\r') != NULL);
+
+    masa_gui_shutdown(gui);
+}
+
 /* ------------------------------------------------------------------ */
 /* Danroot AppKit/CoreGraphics SDL2 backend                            */
 /* ------------------------------------------------------------------ */
@@ -518,6 +680,9 @@ int main(void)
     test_pty_resize();
     test_shell_argv_env();
     test_headless_sdl_render();
+    test_gui_tabs();
+    test_gui_scrollback();
+    test_gui_clipboard();
     test_gui_main_headless();
     test_appkit_symbols();
     test_appkit_run_paints();

@@ -4,7 +4,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.7.0](https://img.shields.io/badge/version-v1.7.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.8.0](https://img.shields.io/badge/version-v1.8.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -32,20 +32,25 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
   run in one place.
 - **It speaks your build systems.** `masa xcode build` reads a checked-in
   `.xcodeproj`, `masa brew` lints formulas *and casks*, builds formulas,
-  taps Homebrew repos and verifies downloads, and
+  taps Homebrew repos, verifies downloads and queries the online formula
+  index, and
   `masa exec` / `masa shell` run `make` and shell scripts with `cc`, `ld`,
-  `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's
-  shims.
+  `ar`, `ranlib`, `strip`, `nm`, `otool`, `codesign`, `pbcopy` and `pbpaste`
+  resolved to Masa's shims.
 - **It ships.** `masa pack --dmg` writes a UDIF disk image and `masa pack
   --ipa` writes the `Payload/<App>.app` ZIP — both from scratch in C11, with no
   Apple tooling.
+- **It's a whole desktop.** `masa-term` is a multi-tab, scrollback,
+  copy/paste terminal built on SDL2 + libvterm, and `masa-gui run` opens a real
+  window for a self-contained Darwin GUI app — the clean-room AppKit and
+  CoreGraphics over SDL2.
 - **It's small and portable.** Pure C11 built with `-std=c11 -Wall -Wextra
   -Werror` and no runtime dependencies for the core. Builds on Linux, Windows
   (MinGW-w64) and Android (NDK).
 
 ## What's in the box
 
-Every capability below ships in **v1.7.0**, inside one dependency-free C11
+Every capability below ships in **v1.8.0**, inside one dependency-free C11
 binary.
 
 | Capability | Command | What it does |
@@ -56,11 +61,13 @@ binary.
 | Xcode projects | `masa xcode build` | Build a checked-in `.xcodeproj` and bundle the `.app`, without Xcode |
 | Homebrew | `masa brew lint` / `masa brew build` | Lint a formula **or a cask** and build a formula into a Cellar |
 | Homebrew online | `masa brew tap` / `masa brew fetch` | Clone a tap and download + **verify** a formula/cask URL against its `sha256` |
+| Homebrew index | `masa brew update` / `info` / `search` | Fetch the Homebrew JSON formula index and query it offline |
+| Clipboard | `pbcopy` / `pbpaste` | macOS clipboard shims backed by a host clipboard tool or a local file |
 | Partial frameworks | `masa sdk init-stub` | Clean-room Metal, QuartzCore, Security and IOKit stubs for Flutter/Dart-style binaries |
 | Package | `masa pack --dmg` / `--ipa` | Write a UDIF `.dmg` or a `Payload/<App>.app` `.ipa` from scratch |
 | Stub SDK | `masa sdk init-stub` | Write the clean-room SDK the linker needs (no Apple SDK) |
-| Build systems | `masa exec`, `masa shell`, `masa init-shims` | Run `make` and scripts with `cc`, `ld`, `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's shims |
-| GUI terminal | `masa-term` | Standalone SDL2 + libvterm terminal running `masa shell` on a real PTY |
+| Build systems | `masa exec`, `masa shell`, `masa init-shims` | Run `make` and scripts with `cc`, `ld`, `ar`, `ranlib`, `strip`, `nm`, `otool`, `codesign`, `pbcopy` and `pbpaste` resolved to Masa's shims |
+| GUI terminal | `masa-term` | Standalone SDL2 + libvterm terminal running `masa shell` on a real PTY — **multi-tab, scrollback, copy/paste** |
 | Readiness check | `masa doctor` | Report whether this host can cross-build Mach-O |
 | Local packaging | `make dist` | Package Linux, Windows and Android archives with `SHA256SUMS` |
 
@@ -137,11 +144,39 @@ masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
 masa brew lint myapp.rb                   # cask lint (auto-detected)
 masa brew tap M5Devs/masa                 # clone a tap
 masa brew fetch myapp.rb -o ./downloads   # download + verify sha256
+masa brew update                          # fetch the formula index
+masa brew info wget                       # query it offline
+masa brew search ssl
+```
+
+**Open the terminal (and copy/paste like it's a Mac):**
+
+```sh
+make gui
+./build/masa-term                         # tabs, scrollback, copy/paste
+echo "hello" | pbcopy && pbpaste          # clipboard shims
 ```
 
 ## Status
 
-Milestone 17 (v1.7.0): **online Homebrew, cask support and partial
+Milestone 18 (v1.8.0): **a full multi-tab terminal, clipboard shims and an
+online Homebrew index.** `masa-term` grows from a single window into an
+iTerm2-style terminal: up to **16 tabs**, each owning its own
+pseudo-terminal *and* its own libvterm screen, opened with **Ctrl-Shift-T**,
+closed with **Ctrl-Shift-W** and cycled with **Ctrl-Tab** (or clicked in the
+new tab bar). Scrolled-off lines are kept per tab in a bounded **scrollback
+ring** (1000 lines) that the mouse wheel and **Shift-PageUp/PageDown** browse,
+while dragging with the mouse selects text and **Ctrl-Shift-C** /
+**Ctrl-Shift-V** copy and paste through the system clipboard. The macOS
+**`pbcopy`/`pbpaste`** commands are now shims too: they prefer a host
+clipboard tool (`wl-copy`/`wl-paste`, `xclip`, `xsel`) and fall back to a
+clean local clipboard file (`$MASA_CLIPBOARD_FILE`) so a copy/paste round trip
+works deterministically in a headless container. Finally, `masa brew` gains
+three **online index** subcommands — `masa brew update` fetches the Homebrew
+`formula.json` index into a cache, and `masa brew info <name>` /
+`masa brew search <query>` query it offline through a small dependency-free
+JSON reader. This sits on the Milestone 17 (v1.7.0) **online Homebrew, cask
+support and partial
 Flutter/Dart framework stubs.** `masa brew` now understands **Homebrew
 Casks** (`cask "name" do ... end`) alongside formulas: `masa brew lint`
 auto-detects which one a `.rb` is and checks a cask's required fields
@@ -469,7 +504,8 @@ Any other name falls through to the normal `masa <subcommand>` router.
 ### Toolchain shims
 
 Darwin build systems call `ld`, `ar`, `ranlib`, `strip`, `nm` and `otool`
-directly, so Masa routes those names to LLVM's equivalents:
+directly, so Masa routes those names to LLVM's equivalents (and answers
+`codesign`, `pbcopy` and `pbpaste` in-process):
 
 | Shim     | Runs                     |
 | -------- | ------------------------ |
@@ -480,6 +516,8 @@ directly, so Masa routes those names to LLVM's equivalents:
 | `nm`     | `llvm-nm`                |
 | `otool`  | `llvm-objdump --macho`   |
 | `codesign` | handled in-process     |
+| `pbcopy`   | host clipboard, else a local clipboard file |
+| `pbpaste`  | host clipboard, else a local clipboard file |
 
 Each tool is located with `clang -print-prog-name=<tool>`, then next to the
 host compiler, then on `PATH`. `ld` additionally supplies a
@@ -500,6 +538,25 @@ signing backend:
 `ld64.lld` already writes an ad-hoc signature for `arm64` output, so a
 Masa-built arm64 executable is genuinely signed. A non-Mach-O target is
 rejected by both modes.
+
+### `pbcopy` / `pbpaste`
+
+macOS scripts pipe to `pbcopy` and read back with `pbpaste`. Masa provides
+both as shims (created by `masa init-shims` and active inside `masa exec` and
+`masa shell`):
+
+```sh
+echo "hello" | pbcopy      # store stdin on the clipboard
+pbpaste                    # hello
+```
+
+`pbcopy` prefers a reachable host clipboard tool — `wl-copy`/`wl-paste`
+(Wayland), `xclip` or `xsel` — and otherwise keeps a clean local clipboard
+file so the round trip still works with no display (CI, a headless
+container). The file defaults to `$TMPDIR/masa-clipboard` and can be pinned
+with `$MASA_CLIPBOARD_FILE`, which also makes the file authoritative for
+deterministic tests. `pbpaste` writes the clipboard to standard output; a
+missing clipboard file is an empty clipboard, not an error.
 
 ### `masa sdk`
 
@@ -695,6 +752,35 @@ copied from the local filesystem, so `fetch` works and is testable offline;
 `$MASA_BREW_TAPS` (default `~/.masa/brew/taps`), and `$MASA_BREW_TAP_BASE`
 overrides the `https://github.com` base (useful for a mirror or an offline
 test).
+
+Three more subcommands make the *index* of formulas available offline:
+
+```sh
+# Fetch the Homebrew formula index (formula.json) into the cache.
+masa brew update
+# masa: brew: downloaded https://formulae.brew.sh/api/formula.json
+# masa: brew: updated /home/you/.masa/brew/formula.json (8000 formulas)
+
+# Show one formula's version, description, homepage and dependencies.
+masa brew info wget
+# wget 1.21.4
+# Internet file retriever
+# From: https://www.gnu.org/software/wget/
+# Dependencies
+#   openssl@3
+#   libidn2
+
+# Search the cached index by (case-insensitive) name substring.
+masa brew search ssl
+# openssl@3
+```
+
+`masa brew update` downloads `formula.json` with `curl -fSL` (a `file://` URL
+or a bare path is copied from the local filesystem, so it is testable
+offline) into `$MASA_BREW_CACHE` (default `~/.masa/brew`). `masa brew info`
+and `masa brew search` read that cache through a small dependency-free JSON
+reader (`src/brew.c`) — no `jq`, no Ruby — and `$MASA_BREW_API_BASE`
+overrides the `https://formulae.brew.sh/api` base.
 
 ### `masa pack`
 
@@ -997,10 +1083,14 @@ Shims the platform queries that build systems use to detect macOS:
 by `make gui` (it links SDL2, SDL2_ttf and libvterm). It opens a real
 pseudo-terminal, runs `masa shell` on it, feeds the output through `libvterm`
 and draws a dark, macOS-style window: a header bar with the red/yellow/green
-traffic lights and the `masa — Darwin` title, the full 256-colour and
-24-bit-RGB ANSI palette, and a blinking block cursor.
+traffic lights and the `masa — Darwin` title, a tab bar, the full 256-colour
+and 24-bit-RGB ANSI palette, and a blinking block cursor.
 
 ![Masa Terminal](assets/masa-term.png)
+
+It is an iTerm2-style terminal: up to **16 tabs**, each with its own
+pseudo-terminal and libvterm screen, a per-tab **scrollback** history, and
+**copy/paste**.
 
 ```sh
 make gui
@@ -1008,8 +1098,24 @@ make gui
 ./build/masa-term --headless   # render a few frames with the dummy driver
 ```
 
+| Action | Shortcut |
+| --- | --- |
+| New tab | `Ctrl-Shift-T` |
+| Close tab | `Ctrl-Shift-W` |
+| Next tab | `Ctrl-Tab` (or click a tab in the bar) |
+| Scroll back / forward | mouse wheel, `Shift-PageUp` / `Shift-PageDown` |
+| Select text | click and drag in the terminal body |
+| Copy selection | `Ctrl-Shift-C` |
+| Paste | `Ctrl-Shift-V` |
+
+Each tab retains the last 1000 scrolled-off lines; the mouse wheel and
+`Shift-PageUp`/`Shift-PageDown` browse that history, and any other keystroke
+snaps the view back to the live screen. Copy sends the selection to the
+system clipboard (SDL's clipboard API) and paste feeds the clipboard through
+`libvterm` so a newline becomes a proper Return.
+
 The window is resizable; the terminal recomputes its rows and columns and
-tells the child through `TIOCSWINSZ` (POSIX) or `ResizePseudoConsole`
+tells every tab's child through `TIOCSWINSZ` (POSIX) or `ResizePseudoConsole`
 (Windows). The monospace font is discovered from a list of common system
 fonts (DejaVu Sans Mono, Liberation Mono, JetBrains Mono, Menlo, ...), or set
 explicitly:
@@ -1053,6 +1159,9 @@ on the build host.
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
 | `MASA_BREW_TAPS` | Directory `masa brew tap` clones taps into |
 | `MASA_BREW_TAP_BASE` | Base URL for `masa brew tap` (default `https://github.com`) |
+| `MASA_BREW_CACHE` | Directory `masa brew update` caches `formula.json` in |
+| `MASA_BREW_API_BASE` | Base URL for `masa brew update` (default `https://formulae.brew.sh/api`) |
+| `MASA_CLIPBOARD_FILE` | File `pbcopy`/`pbpaste` fall back to (no host clipboard) |
 | `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
 | `MASA_LIBRARY_PATH` | Extra colon-separated dirs `masa run` searches for dylibs |
 | `MASA_DANROOT_ROOT` | Virtual root for `masa run` path virtualization        |
@@ -1073,10 +1182,12 @@ src/main.c             CLI router and argv[0] dispatch
 src/cc_wrapper.c       clang wrapper and argument injection
 src/swift_wrapper.c    swiftc wrapper, Package.swift reader and `masa swift`
 src/sys_shims.c        uname / sw_vers / xcode-select / xcrun shims
-src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims and codesign
+src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims, codesign
+                       and the pbcopy / pbpaste clipboard shims
 src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
-src/brew.c             Homebrew formula/cask linter, builder, tap and fetch
+src/brew.c             Homebrew formula/cask linter, builder, tap, fetch and
+                       the online update/info/search JSON index
 src/sha256.c           clean-room SHA-256 for `masa brew fetch` verification
 src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
 src/danroot.c          Masa Danroot: the Mach-O loader (executables and
@@ -1093,7 +1204,8 @@ include/masa_gui.h     interface for masa-term (GUI build only)
 src/pty_posix.c        POSIX pseudo-terminal backend for masa-term
 src/pty_win.c          Windows ConPTY pseudo-terminal backend
 src/pty_common.c       shared `masa shell` argv/env for the PTY backends
-src/gui_term.c         masa-term: SDL2 + libvterm window (make gui)
+src/gui_term.c         masa-term: SDL2 + libvterm window with tabs,
+                       scrollback and copy/paste (make gui)
 scripts/dist.sh        local reproducible packaging (make dist)
 tests/test_masa.c      unit tests
 tests/test_gui.c       masa-term tests (make test-gui)
@@ -1202,7 +1314,17 @@ it ships is listed; and build a Flutter/Dart-style program against
 `-framework QuartzCore -framework Security -framework Metal` and run it
 through `masa danroot`, asserting `CACurrentMediaTime` is positive,
 `SecRandomCopyBytes` fills its buffer, `MTLCreateSystemDefaultDevice` returns
-`NULL` and nothing leaks.
+`NULL` and nothing leaks. The Milestone 18 tests drive the `pbcopy`/`pbpaste`
+shims through `masa pbcopy`/`masa pbpaste` and via `argv[0]` dispatch (a
+round trip through the file fallback, an empty paste when the file is
+missing, and the shims created by `masa init-shims`); run `masa brew
+update`/`info`/`search` against a local `formula.json` fixture (checking the
+formula count, the info fields and dependencies, the case-insensitive search,
+the no-match exit status, and a malformed document rejected without leaking);
+and, in the GUI suite, exercise the new `masa-term` tabs (open/select/close,
+independent screens, tab-bar hit testing), the per-tab scrollback ring
+(accumulation, the oldest/newest retained line, scroll clamping and reset),
+and the clipboard selection/copy/paste translation.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
@@ -1210,7 +1332,10 @@ same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c
 through libvterm and asserts the screen buffer contains `Darwin` and `macOS`;
 it exercises the PTY resize and write paths; and it brings up the SDL2 +
 SDL2_ttf renderer under `SDL_VIDEODRIVER=dummy`, draws a frame, resizes and
-tears down with no ASan/LSan leaks. It also covers the Danroot AppKit backend
+tears down with no ASan/LSan leaks. It also covers the new terminal features:
+opening, selecting, hit-testing and closing tabs (each with an independent
+libvterm screen), the per-tab scrollback ring, and selection copy / clipboard
+paste. It also covers the Danroot AppKit backend
 (compiled into the test with `-DMASA_DANROOT_SDL2`): one test checks the
 CoreGraphics/AppKit symbol surface resolves, and an end-to-end test builds a
 Darwin GUI program with `masa cc` (an `NSWindow` filled with

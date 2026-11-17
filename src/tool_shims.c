@@ -9,6 +9,8 @@
  * nm       -> llvm-nm
  * otool    -> llvm-objdump --macho
  * codesign -> handled in-process (ad-hoc sign / verify)
+ * pbcopy   -> host clipboard tool, else a local clipboard file
+ * pbpaste  -> host clipboard tool, else a local clipboard file
  *
  * Copyright (C) 2026 Masa contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -26,6 +28,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #define MASA_CAPTURE_MAX 4096
 #define MASA_TOOL_MAX_ARGS 4096
@@ -242,6 +250,385 @@ static const struct masa_tool *find_tool(const char *name)
         }
     }
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* pbcopy / pbpaste shims                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Where the local clipboard file lives: $MASA_CLIPBOARD_FILE, else
+ * $TMPDIR/masa-clipboard (Windows: $TEMP), else /tmp/masa-clipboard.
+ */
+static int clipboard_path(char *buf, size_t cap)
+{
+    const char *env = getenv(MASA_CLIPBOARD_FILE_ENV);
+
+    if (env != NULL && env[0] != '\0') {
+        return (snprintf(buf, cap, "%s", env) >= (int)cap) ? -1 : 0;
+    }
+    {
+        const char *base = getenv(MASA_TMPDIR_ENV);
+
+#ifdef _WIN32
+        if (base == NULL || base[0] == '\0') {
+            base = getenv("TEMP");
+        }
+        if (base == NULL || base[0] == '\0') {
+            base = ".";
+        }
+#else
+        if (base == NULL || base[0] == '\0') {
+            base = "/tmp";
+        }
+#endif
+        if (base[strlen(base) - 1] == '/') {
+            return (snprintf(buf, cap, "%smasa-clipboard", base) >= (int)cap)
+                       ? -1
+                       : 0;
+        }
+        return (snprintf(buf, cap, "%s/masa-clipboard", base) >= (int)cap)
+                   ? -1
+                   : 0;
+    }
+}
+
+static int clipboard_file_write(const char *path, const char *data, size_t len)
+{
+    FILE *fp = fopen(path, "wb");
+
+    if (fp == NULL) {
+        return -1;
+    }
+    if (len > 0 && fwrite(data, 1, len, fp) != len) {
+        fclose(fp);
+        return -1;
+    }
+    return (fclose(fp) == 0) ? 0 : -1;
+}
+
+/* A missing clipboard file is an empty clipboard, not an error. */
+static int clipboard_file_read(const char *path, char *out, size_t outcap)
+{
+    FILE *fp;
+    size_t used = 0;
+
+    if (out != NULL && outcap > 0) {
+        out[0] = '\0';
+    }
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return 0;
+    }
+    if (out != NULL && outcap > 1) {
+        used = fread(out, 1, outcap - 1, fp);
+        out[used] = '\0';
+    }
+    fclose(fp);
+    return 0;
+}
+
+/* Read all of standard input into a malloc'd buffer (NUL-terminated). */
+static int clipboard_read_stdin(char **out, size_t *out_len)
+{
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = malloc(cap);
+
+    if (buf == NULL) {
+        return -1;
+    }
+    for (;;) {
+        size_t n;
+
+        if (len == cap) {
+            char *grown = realloc(buf, cap * 2);
+
+            if (grown == NULL) {
+                free(buf);
+                return -1;
+            }
+            buf = grown;
+            cap *= 2;
+        }
+        n = fread(buf + len, 1, cap - len, stdin);
+        len += n;
+        if (n == 0) {
+            if (feof(stdin)) {
+                break;
+            }
+            if (ferror(stdin)) {
+                free(buf);
+                return -1;
+            }
+        }
+    }
+    buf[len] = '\0';
+    *out = buf;
+    *out_len = len;
+    return 0;
+}
+
+#ifndef _WIN32
+/*
+ * Feed data to argv's standard input and wait for it.  Returns the child's
+ * exit status, or -1 when the tool could not be started (execvp failed
+ * with the child exiting 127).  Nothing is printed on a missing tool so
+ * the caller can quietly try the next candidate.
+ */
+static int clipboard_feed(const char *const argv[], const char *data,
+                          size_t len)
+{
+    int fds[2];
+    pid_t pid;
+    int status = -1;
+    size_t off = 0;
+
+    if (pipe(fds) != 0) {
+        return -1;
+    }
+    fflush(stdout);
+    fflush(stderr);
+
+    pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(fds[1]);
+        if (dup2(fds[0], STDIN_FILENO) < 0) {
+            _exit(127);
+        }
+        close(fds[0]);
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+
+    close(fds[0]);
+    while (off < len) {
+        ssize_t n = write(fds[1], data + off, len - off);
+
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        off += (size_t)n;
+    }
+    close(fds[1]);
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* Capture argv's standard output into out (NUL-terminated). */
+static int clipboard_capture(const char *const argv[], char *out, size_t outcap)
+{
+    int fds[2];
+    pid_t pid;
+    int status = -1;
+    size_t used = 0;
+
+    if (out != NULL && outcap > 0) {
+        out[0] = '\0';
+    }
+    if (pipe(fds) != 0) {
+        return -1;
+    }
+    fflush(stdout);
+    fflush(stderr);
+
+    pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) {
+            _exit(127);
+        }
+        close(fds[1]);
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    for (;;) {
+        ssize_t n;
+
+        if (out != NULL && used < outcap - 1) {
+            n = read(fds[0], out + used, outcap - 1 - used);
+        } else {
+            char scratch[512];
+
+            n = read(fds[0], scratch, sizeof(scratch));
+        }
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (out != NULL && used < outcap - 1) {
+            used += (size_t)n;
+        }
+    }
+    close(fds[0]);
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    if (out != NULL && outcap > 0) {
+        out[used] = '\0';
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* Store data on a host clipboard.  Returns 1 when a tool accepted it. */
+static int clipboard_try_host_copy(const char *data, size_t len)
+{
+    static const char *const cmds[][5] = {
+        {"wl-copy", NULL},
+        {"xclip", "-selection", "clipboard", NULL},
+        {"xsel", "-i", "--clipboard", NULL},
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        if (clipboard_feed(cmds[i], data, len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Read a host clipboard into out.  Returns 1 when a tool supplied data. */
+static int clipboard_try_host_paste(char *out, size_t outcap)
+{
+    static const char *const cmds[][5] = {
+        {"wl-paste", NULL},
+        {"xclip", "-selection", "clipboard", "-o", NULL},
+        {"xsel", "-o", "--clipboard", NULL},
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        if (clipboard_capture(cmds[i], out, outcap) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif /* !_WIN32 */
+
+int masa_clipboard_is_shim(const char *name)
+{
+    return (name != NULL &&
+            (strcmp(name, "pbcopy") == 0 || strcmp(name, "pbpaste") == 0));
+}
+
+int masa_pbcopy_dispatch(int argc, char *const argv[])
+{
+    char *data = NULL;
+    size_t len = 0;
+    char path[MASA_PATH_MAX];
+    int rc;
+
+    (void)argc;
+    (void)argv;
+
+    if (clipboard_read_stdin(&data, &len) != 0) {
+        fprintf(stderr, "masa: pbcopy: cannot read standard input\n");
+        return 1;
+    }
+    if (clipboard_path(path, sizeof(path)) != 0) {
+        free(data);
+        fprintf(stderr, "masa: pbcopy: clipboard path too long\n");
+        return 1;
+    }
+
+    /*
+     * With $MASA_CLIPBOARD_FILE set the file is authoritative, which keeps
+     * the round trip deterministic in a headless container.  Otherwise a
+     * reachable host clipboard tool is preferred and the file is kept in
+     * sync so `pbpaste` still works where no display is available.
+     */
+#ifndef _WIN32
+    {
+        const char *forced = getenv(MASA_CLIPBOARD_FILE_ENV);
+
+        if (forced == NULL || forced[0] == '\0') {
+            clipboard_try_host_copy(data, len);
+        }
+    }
+#endif
+
+    rc = clipboard_file_write(path, data, len);
+    free(data);
+    if (rc != 0) {
+        fprintf(stderr, "masa: pbcopy: cannot write '%s': %s\n", path,
+                strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+int masa_pbpaste_dispatch(int argc, char *const argv[])
+{
+    char path[MASA_PATH_MAX];
+    char *text = NULL;
+    size_t cap = 65536;
+
+    (void)argc;
+    (void)argv;
+
+    if (clipboard_path(path, sizeof(path)) != 0) {
+        fprintf(stderr, "masa: pbpaste: clipboard path too long\n");
+        return 1;
+    }
+    text = malloc(cap);
+    if (text == NULL) {
+        fprintf(stderr, "masa: pbpaste: out of memory\n");
+        return 1;
+    }
+    text[0] = '\0';
+
+#ifndef _WIN32
+    {
+        const char *forced = getenv(MASA_CLIPBOARD_FILE_ENV);
+
+        if (forced == NULL || forced[0] == '\0') {
+            if (clipboard_try_host_paste(text, cap)) {
+                fputs(text, stdout);
+                free(text);
+                return 0;
+            }
+        }
+    }
+#endif
+
+    if (clipboard_file_read(path, text, cap) != 0) {
+        fprintf(stderr, "masa: pbpaste: cannot read '%s'\n", path);
+        free(text);
+        return 1;
+    }
+    fputs(text, stdout);
+    free(text);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

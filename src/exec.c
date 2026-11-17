@@ -37,6 +37,8 @@ const char *const masa_shim_tools[] = {
     "nm",
     "otool",
     "codesign",
+    "pbcopy",
+    "pbpaste",
     NULL
 };
 

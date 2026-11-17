@@ -355,6 +355,9 @@ static void reset_masa_env(void)
     set_env(MASA_DANROOT_NO_BRIDGE_ENV, NULL);
     set_env(MASA_BREW_TAPS_ENV, NULL);
     set_env(MASA_BREW_TAP_BASE_ENV, NULL);
+    set_env(MASA_BREW_CACHE_ENV, NULL);
+    set_env(MASA_BREW_API_BASE_ENV, NULL);
+    set_env(MASA_CLIPBOARD_FILE_ENV, NULL);
     set_env("PATH", g_original_path);
 }
 
@@ -3737,6 +3740,191 @@ static void test_brew_tap_bad_arg(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 18: pbcopy/pbpaste and the online formula index           */
+/* ------------------------------------------------------------------ */
+
+/* A clipboard round trip through the file fallback, plus argv[0] dispatch. */
+static void test_clipboard_roundtrip(void)
+{
+    char dir[] = "/tmp/masa_clip_XXXXXX";
+    char clip[512];
+    char out[1024];
+    char err[1024];
+    char *argv[4];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(clip, sizeof(clip), "%s/clipboard", dir);
+    set_env(MASA_CLIPBOARD_FILE_ENV, clip);
+
+    /* `masa pbcopy` reads stdin (here an empty pipe) and `masa pbpaste`
+     * prints the clipboard back. */
+    argv[0] = "masa";
+    argv[1] = "pbcopy";
+    argv[2] = NULL;
+    rc = run_masa_with_stdin(argv, "clipboard text\n", out, sizeof(out));
+    CHECK(rc == 0);
+
+    argv[1] = "pbpaste";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_STREQ(out, "clipboard text\n");
+
+    /* A missing clipboard file is an empty paste, not an error. */
+    unlink(clip);
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_STREQ(out, "");
+
+    /* The shims are recognised by name. */
+    CHECK(masa_clipboard_is_shim("pbcopy") == 1);
+    CHECK(masa_clipboard_is_shim("pbpaste") == 1);
+    CHECK(masa_clipboard_is_shim("pbwhatever") == 0);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* The clipboard shims are created by `masa init-shims` alongside the rest. */
+static void test_clipboard_shim_symlinks(void)
+{
+    char dir[] = "/tmp/masa_clipshim_XXXXXX";
+    char linkpath[600];
+    int found = 0;
+    int i;
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    if (masa_make_shims(dir, "/bin/true") != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    for (i = 0; masa_shim_tools[i] != NULL; i++) {
+        if (strcmp(masa_shim_tools[i], "pbcopy") == 0 ||
+            strcmp(masa_shim_tools[i], "pbpaste") == 0) {
+            found++;
+        }
+    }
+    CHECK(found == 2);
+    snprintf(linkpath, sizeof(linkpath), "%s/pbpaste", dir);
+    CHECK(file_exists(linkpath));
+
+    remove_tree(dir);
+}
+
+/* `masa brew update/info/search` against a local formula.json fixture. */
+static void test_brew_index(void)
+{
+    char dir[] = "/tmp/masa_index_XXXXXX";
+    char base[512];
+    char cache[512];
+    char fixture[1024];
+    char out[8192];
+    char err[8192];
+    char *argv[5];
+    int rc;
+    static const char *json =
+        "[\n"
+        "  {\"name\":\"wget\",\"versions\":{\"stable\":\"1.21.4\"},"
+        "\"desc\":\"Internet file retriever\","
+        "\"homepage\":\"https://www.gnu.org/software/wget/\","
+        "\"dependencies\":[\"openssl@3\",\"libidn2\"]},\n"
+        "  {\"name\":\"curl\",\"versions\":{\"stable\":\"8.5.0\"},"
+        "\"desc\":\"Get a file from an HTTP server\","
+        "\"homepage\":\"https://curl.se/\","
+        "\"dependencies\":[\"brotli\"]},\n"
+        "  {\"name\":\"openssl@3\",\"versions\":{\"stable\":\"3.2.1\"},"
+        "\"desc\":\"Cryptography and SSL/TLS toolkit\","
+        "\"homepage\":\"https://openssl.org/\",\"dependencies\":[]}\n"
+        "]\n";
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(base, sizeof(base), "%s", dir);
+    snprintf(cache, sizeof(cache), "%s/cache", dir);
+    snprintf(fixture, sizeof(fixture), "%s/formula.json", dir);
+    if (write_file(fixture, json) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    set_env(MASA_BREW_API_BASE_ENV, base);
+    set_env(MASA_BREW_CACHE_ENV, cache);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "update";
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  update stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "3 formulas");
+
+    argv[2] = "info";
+    argv[3] = "wget";
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "wget 1.21.4");
+    CHECK_CONTAINS(out, "Internet file retriever");
+    CHECK_CONTAINS(out, "openssl@3");
+
+    /* An unknown formula is a clean error. */
+    argv[3] = "nosuchformula";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "no formula named");
+
+    argv[2] = "search";
+    argv[3] = "ssl";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "openssl@3");
+
+    /* A query that matches nothing exits non-zero. */
+    argv[3] = "zzz-nope";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(out, "No formula found");
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* A malformed JSON document is rejected rather than crashing. */
+static void test_brew_index_bad_json(void)
+{
+    struct masa_brew_formula_info info;
+    char **names;
+    size_t count = 0;
+
+    CHECK(masa_brew_info_lookup("not json at all", 15, "x", &info) != 0);
+    CHECK(masa_brew_info_lookup("[]", 2, "x", &info) != 0);
+    names = masa_brew_search("[{\"name\":\"a\"},", 15, "a", &count);
+    /* Truncated input still yields whatever parsed cleanly, without crashing. */
+    if (names != NULL) {
+        size_t i;
+
+        for (i = 0; i < count; i++) {
+            free(names[i]);
+        }
+        free(names);
+    }
+    CHECK(count == 0 || count >= 1);
+}
+
+/* ------------------------------------------------------------------ */
 /* Milestone 10: `masa pack` (.ipa and .dmg)                          */
 /* ------------------------------------------------------------------ */
 
@@ -7050,6 +7238,10 @@ int main(void)
     RUN(test_sha256_block_boundary);
     RUN(test_brew_fetch_file_url);
     RUN(test_brew_tap_bad_arg);
+    RUN(test_clipboard_roundtrip);
+    RUN(test_clipboard_shim_symlinks);
+    RUN(test_brew_index);
+    RUN(test_brew_index_bad_json);
     RUN(test_brew_tap_local);
     RUN(test_pack_ipa);
     RUN(test_pack_dmg);

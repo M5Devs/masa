@@ -1743,6 +1743,770 @@ int masa_brew_fetch_main(int argc, char *const argv[])
 }
 
 /* ------------------------------------------------------------------ */
+/* Online formula index: a minimal JSON scanner                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A cursor over a JSON document.  The scanner is deliberately tiny: it
+ * decodes strings (with the standard escapes) and skips whole values, which
+ * is all the Homebrew formula index needs.  It does not build a DOM, so a
+ * multi-megabyte formula.json costs nothing to walk.
+ */
+struct json {
+    const char *p;
+    const char *end;
+};
+
+static void json_ws(struct json *j)
+{
+    while (j->p < j->end) {
+        char c = *j->p;
+
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            j->p++;
+            continue;
+        }
+        break;
+    }
+}
+
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return 0;
+}
+
+static int json_utf8(uint32_t cp, char *out)
+{
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/*
+ * Decode the JSON string at j->p (which must be a '"'), returning a
+ * malloc'd UTF-8 copy and advancing past the closing quote.  Returns NULL
+ * on a malformed or unterminated string (leaving j->p unchanged when it
+ * never saw an opening quote).
+ */
+static char *json_string(struct json *j)
+{
+    char *out;
+    size_t cap;
+    size_t len = 0;
+
+    if (j->p >= j->end || *j->p != '"') {
+        return NULL;
+    }
+    j->p++;
+    cap = (size_t)(j->end - j->p) + 1;
+    out = malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    while (j->p < j->end) {
+        char c = *j->p++;
+
+        if (c == '"') {
+            out[len] = '\0';
+            return out;
+        }
+        if (c == '\\') {
+            char e;
+
+            if (j->p >= j->end) {
+                break;
+            }
+            e = *j->p++;
+            switch (e) {
+            case '"':  out[len++] = '"';  break;
+            case '\\': out[len++] = '\\'; break;
+            case '/':  out[len++] = '/';  break;
+            case 'b':  out[len++] = '\b'; break;
+            case 'f':  out[len++] = '\f'; break;
+            case 'n':  out[len++] = '\n'; break;
+            case 'r':  out[len++] = '\r'; break;
+            case 't':  out[len++] = '\t'; break;
+            case 'u': {
+                unsigned cp = 0;
+                int k;
+
+                for (k = 0; k < 4 && j->p < j->end; k++) {
+                    cp = (cp << 4) | (unsigned)hexval(*j->p++);
+                }
+                if (cp >= 0xD800 && cp <= 0xDBFF && j->p + 1 < j->end &&
+                    j->p[0] == '\\' && j->p[1] == 'u') {
+                    unsigned lo = 0;
+
+                    j->p += 2;
+                    for (k = 0; k < 4 && j->p < j->end; k++) {
+                        lo = (lo << 4) | (unsigned)hexval(*j->p++);
+                    }
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
+                }
+                len += (size_t)json_utf8(cp, out + len);
+                break;
+            }
+            default:
+                out[len++] = e;
+                break;
+            }
+        } else {
+            out[len++] = c;
+        }
+    }
+
+    free(out);
+    return NULL;
+}
+
+/* Skip one JSON value.  Returns 0 on success and -1 on a malformed doc. */
+static int json_skip_value(struct json *j)
+{
+    char c;
+
+    json_ws(j);
+    if (j->p >= j->end) {
+        return -1;
+    }
+    c = *j->p;
+
+    if (c == '"') {
+        char *s = json_string(j);
+
+        if (s == NULL) {
+            return -1;
+        }
+        free(s);
+        return 0;
+    }
+    if (c == '{' || c == '[') {
+        char open = c;
+        char close = (c == '{') ? '}' : ']';
+        int depth = 0;
+
+        while (j->p < j->end) {
+            char d = *j->p;
+
+            if (d == '"') {
+                char *s = json_string(j);
+
+                if (s == NULL) {
+                    return -1;
+                }
+                free(s);
+                continue;
+            }
+            if (d == open) {
+                depth++;
+            } else if (d == close) {
+                depth--;
+                j->p++;
+                if (depth == 0) {
+                    return 0;
+                }
+                continue;
+            }
+            j->p++;
+        }
+        return -1;
+    }
+
+    /* number / true / false / null */
+    while (j->p < j->end) {
+        char d = *j->p;
+
+        if (d == ',' || d == '}' || d == ']' || d == ' ' || d == '\t' ||
+            d == '\n' || d == '\r') {
+            break;
+        }
+        j->p++;
+    }
+    return 0;
+}
+
+void masa_brew_formula_info_free(struct masa_brew_formula_info *info)
+{
+    size_t i;
+
+    if (info == NULL) {
+        return;
+    }
+    free(info->name);
+    free(info->version);
+    free(info->desc);
+    free(info->homepage);
+    for (i = 0; i < info->dep_count; i++) {
+        free(info->deps[i]);
+    }
+    free(info->deps);
+    memset(info, 0, sizeof(*info));
+}
+
+/* Parse `"versions": { "stable": "1.2.3", ... }`, keeping only stable. */
+static void json_parse_versions(struct json *j, struct masa_brew_formula_info *info)
+{
+    json_ws(j);
+    if (j->p >= j->end || *j->p != '{') {
+        json_skip_value(j);
+        return;
+    }
+    j->p++;
+
+    for (;;) {
+        char *key;
+
+        json_ws(j);
+        if (j->p >= j->end || *j->p == '}') {
+            if (j->p < j->end) {
+                j->p++;
+            }
+            return;
+        }
+        if (*j->p == ',') {
+            j->p++;
+            continue;
+        }
+        key = json_string(j);
+        if (key == NULL) {
+            return;
+        }
+        json_ws(j);
+        if (j->p < j->end && *j->p == ':') {
+            j->p++;
+        }
+        json_ws(j);
+        if (strcmp(key, "stable") == 0 && info->version == NULL) {
+            char *v = json_string(j);
+
+            if (v != NULL) {
+                info->version = v;
+            } else {
+                json_skip_value(j);
+            }
+        } else {
+            json_skip_value(j);
+        }
+        free(key);
+    }
+}
+
+/* Parse `"dependencies": ["a", "b", ...]`. */
+static void json_parse_deps(struct json *j, struct masa_brew_formula_info *info)
+{
+    json_ws(j);
+    if (j->p >= j->end || *j->p != '[') {
+        json_skip_value(j);
+        return;
+    }
+    j->p++;
+
+    for (;;) {
+        char *v;
+
+        json_ws(j);
+        if (j->p >= j->end || *j->p == ']') {
+            if (j->p < j->end) {
+                j->p++;
+            }
+            return;
+        }
+        if (*j->p == ',') {
+            j->p++;
+            continue;
+        }
+        v = json_string(j);
+        if (v == NULL) {
+            json_skip_value(j);
+            continue;
+        }
+        {
+            char **grown = realloc(info->deps,
+                                   (info->dep_count + 1) * sizeof(char *));
+
+            if (grown != NULL) {
+                info->deps = grown;
+                info->deps[info->dep_count++] = v;
+            } else {
+                free(v);
+            }
+        }
+    }
+}
+
+/*
+ * Parse one formula object (j->p at the '{') into info, keeping only the
+ * fields masa brew info/search need.  Returns 0 on success.
+ */
+static int json_parse_formula(struct json *j, struct masa_brew_formula_info *info)
+{
+    json_ws(j);
+    if (j->p >= j->end || *j->p != '{') {
+        return -1;
+    }
+    j->p++;
+
+    for (;;) {
+        char *key;
+
+        json_ws(j);
+        if (j->p >= j->end) {
+            return -1;
+        }
+        if (*j->p == '}') {
+            j->p++;
+            return 0;
+        }
+        if (*j->p == ',') {
+            j->p++;
+            continue;
+        }
+        key = json_string(j);
+        if (key == NULL) {
+            return -1;
+        }
+        json_ws(j);
+        if (j->p < j->end && *j->p == ':') {
+            j->p++;
+        }
+        json_ws(j);
+        if (strcmp(key, "name") == 0 || strcmp(key, "desc") == 0 ||
+            strcmp(key, "homepage") == 0) {
+            char *v = json_string(j);
+
+            if (v != NULL) {
+                if (strcmp(key, "name") == 0) {
+                    free(info->name);
+                    info->name = v;
+                } else if (strcmp(key, "desc") == 0) {
+                    free(info->desc);
+                    info->desc = v;
+                } else {
+                    free(info->homepage);
+                    info->homepage = v;
+                }
+            } else {
+                json_skip_value(j);
+            }
+        } else if (strcmp(key, "versions") == 0) {
+            json_parse_versions(j, info);
+        } else if (strcmp(key, "dependencies") == 0) {
+            json_parse_deps(j, info);
+        } else {
+            json_skip_value(j);
+        }
+        free(key);
+    }
+}
+
+/* Case-insensitive "needle appears in hay". */
+static int str_icontains(const char *hay, const char *needle)
+{
+    size_t nlen = strlen(needle);
+    size_t hlen = strlen(hay);
+    size_t i;
+
+    if (nlen == 0) {
+        return 1;
+    }
+    if (hlen < nlen) {
+        return 0;
+    }
+    for (i = 0; i + nlen <= hlen; i++) {
+        size_t k;
+
+        for (k = 0; k < nlen; k++) {
+            if (tolower((unsigned char)hay[i + k]) !=
+                tolower((unsigned char)needle[k])) {
+                break;
+            }
+        }
+        if (k == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Count the top-level objects in a formula.json array. */
+static size_t json_count_objects(const char *text, size_t len)
+{
+    struct json j;
+    size_t n = 0;
+
+    j.p = text;
+    j.end = text + len;
+    json_ws(&j);
+    if (j.p >= j.end || *j.p != '[') {
+        return 0;
+    }
+    j.p++;
+    for (;;) {
+        json_ws(&j);
+        if (j.p >= j.end || *j.p == ']') {
+            break;
+        }
+        if (*j.p == ',') {
+            j.p++;
+            continue;
+        }
+        if (*j.p != '{') {
+            break;
+        }
+        if (json_skip_value(&j) != 0) {
+            break;
+        }
+        n++;
+    }
+    return n;
+}
+
+int masa_brew_info_lookup(const char *text, size_t len, const char *name,
+                          struct masa_brew_formula_info *out)
+{
+    struct json j;
+
+    if (out == NULL) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    j.p = text;
+    j.end = text + len;
+    json_ws(&j);
+    if (j.p >= j.end || *j.p != '[') {
+        return -1;
+    }
+    j.p++;
+
+    for (;;) {
+        struct masa_brew_formula_info info;
+
+        json_ws(&j);
+        if (j.p >= j.end || *j.p == ']') {
+            return -1;
+        }
+        if (*j.p == ',') {
+            j.p++;
+            continue;
+        }
+        memset(&info, 0, sizeof(info));
+        if (json_parse_formula(&j, &info) != 0) {
+            masa_brew_formula_info_free(&info);
+            return -1;
+        }
+        if (info.name != NULL && str_ieq(info.name, name)) {
+            *out = info;
+            return 0;
+        }
+        masa_brew_formula_info_free(&info);
+    }
+}
+
+char **masa_brew_search(const char *text, size_t len, const char *query,
+                        size_t *count)
+{
+    struct json j;
+    char **names = NULL;
+    size_t n = 0;
+
+    if (count != NULL) {
+        *count = 0;
+    }
+    j.p = text;
+    j.end = text + len;
+    json_ws(&j);
+    if (j.p >= j.end || *j.p != '[') {
+        return NULL;
+    }
+    j.p++;
+
+    for (;;) {
+        struct masa_brew_formula_info info;
+
+        json_ws(&j);
+        if (j.p >= j.end || *j.p == ']') {
+            break;
+        }
+        if (*j.p == ',') {
+            j.p++;
+            continue;
+        }
+        memset(&info, 0, sizeof(info));
+        if (json_parse_formula(&j, &info) != 0) {
+            masa_brew_formula_info_free(&info);
+            break;
+        }
+        if (info.name != NULL && str_icontains(info.name, query)) {
+            char **grown = realloc(names, (n + 2) * sizeof(char *));
+
+            if (grown != NULL) {
+                names = grown;
+                names[n] = strdup(info.name);
+                if (names[n] != NULL) {
+                    n++;
+                }
+                names[n] = NULL;
+            }
+        }
+        masa_brew_formula_info_free(&info);
+    }
+
+    if (count != NULL) {
+        *count = n;
+    }
+    return names;
+}
+
+/* The formula-index cache directory: $MASA_BREW_CACHE, else $HOME/.masa/brew. */
+static int brew_cache_dir(char *buf, size_t cap)
+{
+    const char *env = getenv(MASA_BREW_CACHE_ENV);
+
+    if (env != NULL && env[0] != '\0') {
+        return (snprintf(buf, cap, "%s", env) >= (int)cap) ? -1 : 0;
+    }
+    {
+        const char *home = getenv("HOME");
+
+#ifdef _WIN32
+        if (home == NULL || home[0] == '\0') {
+            home = getenv("USERPROFILE");
+        }
+#endif
+        if (home == NULL || home[0] == '\0') {
+            home = "/tmp";
+        }
+        return (snprintf(buf, cap, "%s/.masa/brew", home) >= (int)cap) ? -1 : 0;
+    }
+}
+
+static const char *brew_api_base(void)
+{
+    const char *env = getenv(MASA_BREW_API_BASE_ENV);
+
+    if (env != NULL && env[0] != '\0') {
+        return env;
+    }
+    return MASA_BREW_API_BASE_DEFAULT;
+}
+
+int masa_brew_update_main(int argc, char *const argv[])
+{
+    char cache[MASA_PATH_MAX];
+    char dest[MASA_PATH_MAX];
+    char src[MASA_PATH_MAX];
+    const char *base;
+    const char *local;
+    const char *sep;
+
+    (void)argc;
+    (void)argv;
+
+    if (brew_cache_dir(cache, sizeof(cache)) != 0) {
+        fprintf(stderr, "masa: brew update: cache path too long\n");
+        return 1;
+    }
+    if (masa_mkdir_p(cache) != 0) {
+        fprintf(stderr, "masa: brew update: cannot create '%s': %s\n", cache,
+                strerror(errno));
+        return 1;
+    }
+    if (snprintf(dest, sizeof(dest), "%s/formula.json", cache) >=
+        (int)sizeof(dest)) {
+        fprintf(stderr, "masa: brew update: cache path too long\n");
+        return 1;
+    }
+
+    base = brew_api_base();
+    sep = (base[strlen(base) - 1] == '/') ? "" : "/";
+
+    /*
+     * A file:// URL or a bare path is read from the local filesystem, so
+     * the index can be refreshed offline (a mirror, a cache, or a test
+     * fixture); anything with a scheme is downloaded with curl.
+     */
+    if (strncmp(base, "file://", 7) == 0) {
+        local = base + 7;
+    } else if (strstr(base, "://") == NULL) {
+        local = base;
+    } else {
+        local = NULL;
+    }
+
+    if (local != NULL) {
+        if (snprintf(src, sizeof(src), "%s%sformula.json", local, sep) >=
+            (int)sizeof(src)) {
+            fprintf(stderr, "masa: brew update: source path too long\n");
+            return 1;
+        }
+        if (copy_file(src, dest) != 0) {
+            fprintf(stderr, "masa: brew update: cannot copy '%s': %s\n", src,
+                    strerror(errno));
+            return 1;
+        }
+        printf("masa: brew: copied %s -> %s\n", src, dest);
+    } else {
+        const char *curl[6];
+        char url[MASA_PATH_MAX];
+        int rc;
+
+        if (snprintf(url, sizeof(url), "%s%sformula.json", base, sep) >=
+            (int)sizeof(url)) {
+            fprintf(stderr, "masa: brew update: URL too long\n");
+            return 1;
+        }
+        curl[0] = "curl";
+        curl[1] = "-fSL";
+        curl[2] = "-o";
+        curl[3] = dest;
+        curl[4] = url;
+        curl[5] = NULL;
+        rc = masa_spawn_wait(curl);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "masa: brew update: curl failed for %s (status %d)\n", url,
+                    rc);
+            return 1;
+        }
+        printf("masa: brew: downloaded %s\n", url);
+    }
+
+    {
+        char *text = NULL;
+        size_t text_len = 0;
+        char err[256];
+
+        if (read_whole_file(dest, &text, &text_len, err, sizeof(err)) != 0) {
+            fprintf(stderr, "masa: brew update: %s\n", err);
+            return 1;
+        }
+        printf("masa: brew: updated %s (" MASA_SIZE_FMT " formulas)\n", dest,
+               MASA_SIZE_ARG(json_count_objects(text, text_len)));
+        free(text);
+    }
+    return 0;
+}
+
+/* Load the cached formula.json; report how to fetch it when missing. */
+static int brew_load_index(char **out, size_t *out_len)
+{
+    char cache[MASA_PATH_MAX];
+    char dest[MASA_PATH_MAX];
+    char err[256];
+
+    if (brew_cache_dir(cache, sizeof(cache)) != 0 ||
+        snprintf(dest, sizeof(dest), "%s/formula.json", cache) >=
+            (int)sizeof(dest)) {
+        fprintf(stderr, "masa: brew: cache path too long\n");
+        return -1;
+    }
+    if (read_whole_file(dest, out, out_len, err, sizeof(err)) != 0) {
+        fprintf(stderr,
+                "masa: brew: no cached index (%s); run `masa brew update`\n",
+                dest);
+        return -1;
+    }
+    return 0;
+}
+
+int masa_brew_info_main(int argc, char *const argv[])
+{
+    char *text = NULL;
+    size_t text_len = 0;
+    struct masa_brew_formula_info info;
+
+    if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
+        fprintf(stderr, "masa: brew info: missing <name>\n");
+        return 2;
+    }
+    if (brew_load_index(&text, &text_len) != 0) {
+        return 1;
+    }
+    if (masa_brew_info_lookup(text, text_len, argv[0], &info) != 0) {
+        fprintf(stderr, "masa: brew info: no formula named '%s'\n", argv[0]);
+        free(text);
+        return 1;
+    }
+    free(text);
+
+    printf("%s %s\n", info.name, (info.version != NULL) ? info.version : "");
+    if (info.desc != NULL) {
+        printf("%s\n", info.desc);
+    }
+    if (info.homepage != NULL) {
+        printf("From: %s\n", info.homepage);
+    }
+    if (info.dep_count > 0) {
+        size_t i;
+
+        printf("Dependencies\n");
+        for (i = 0; i < info.dep_count; i++) {
+            printf("  %s\n", info.deps[i]);
+        }
+    }
+    masa_brew_formula_info_free(&info);
+    return 0;
+}
+
+int masa_brew_search_main(int argc, char *const argv[])
+{
+    char *text = NULL;
+    size_t text_len = 0;
+    char **names;
+    size_t count = 0;
+    size_t i;
+
+    if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
+        fprintf(stderr, "masa: brew search: missing <query>\n");
+        return 2;
+    }
+    if (brew_load_index(&text, &text_len) != 0) {
+        return 1;
+    }
+    names = masa_brew_search(text, text_len, argv[0], &count);
+    free(text);
+    if (names == NULL || count == 0) {
+        printf("No formula found for '%s'\n", argv[0]);
+        free(names);
+        return 1;
+    }
+    for (i = 0; i < count; i++) {
+        printf("%s\n", names[i]);
+        free(names[i]);
+    }
+    free(names);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Entry point                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -1811,6 +2575,15 @@ int masa_brew_main(int argc, char *const argv[])
     }
     if (strcmp(argv[0], "fetch") == 0) {
         return brew_fetch(argc - 1, &argv[1]);
+    }
+    if (strcmp(argv[0], "update") == 0) {
+        return masa_brew_update_main(argc - 1, &argv[1]);
+    }
+    if (strcmp(argv[0], "info") == 0) {
+        return masa_brew_info_main(argc - 1, &argv[1]);
+    }
+    if (strcmp(argv[0], "search") == 0) {
+        return masa_brew_search_main(argc - 1, &argv[1]);
     }
 
     fprintf(stderr, "masa: brew: unknown subcommand '%s'\n", argv[0]);

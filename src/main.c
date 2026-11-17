@@ -42,6 +42,10 @@ static void print_usage(FILE *out, const char *prog)
             "  %s brew tap <user/repo>     Clone/update a Homebrew tap\n"
             "  %s brew fetch <formula.rb> [-o <dir>]\n"
             "                              Download and verify a formula/cask URL\n"
+            "  %s brew update              Fetch the Homebrew formula JSON index\n"
+            "  %s brew info <name>         Show a formula from the cached index\n"
+            "  %s brew search <query>      Search the cached formula index\n"
+            "  %s pbcopy | pbpaste         Copy stdin / paste stdout via the clipboard\n"
             "  %s swift build [dir]        Build a Swift package (or swiftc wrapper)\n"
             "  %s swift info [dir]         Report a Package.swift's name and layout\n"
             "  %s doctor                   Check local macOS cross-build readiness\n"
@@ -65,17 +69,21 @@ static void print_usage(FILE *out, const char *prog)
             "  MASA_BREW_PREFIX  prefix for `masa brew build` (default: %s)\n"
             "  MASA_BREW_TAPS  directory `masa brew tap` clones into\n"
             "  MASA_BREW_TAP_BASE  base URL for `masa brew tap` (default: https://github.com)\n"
+            "  MASA_BREW_CACHE  directory `masa brew update` caches formula.json in\n"
+            "  MASA_BREW_API_BASE  base URL for `masa brew update` (default: https://formulae.brew.sh/api)\n"
+            "  MASA_CLIPBOARD_FILE  file pbcopy/pbpaste fall back to (no host clipboard)\n"
             "  MASA_KEEP_PS1   set to 1 so `masa shell` keeps the caller's prompt\n"
             "  MASA_DANROOT_ROOT  virtual root for `masa run` path virtualization\n"
             "\n"
             "When invoked as one of the shim names below, Masa acts as that\n"
             "command directly (create the links with `masa init-shims <dir>`):\n"
             "  cc, clang, gcc, swift, swiftc, uname, sw_vers, xcode-select, xcrun,\n"
-            "  ld, ar, ranlib, strip, nm, otool, codesign\n",
+            "  ld, ar, ranlib, strip, nm, otool, codesign, pbcopy, pbpaste\n",
             MASA_VERSION,
             prog, prog, prog, prog, prog, prog, prog, prog,
             prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog, prog, prog, prog, prog,
+            prog, prog, prog, prog, prog, prog, prog, prog,
+            prog, prog,
             MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 
@@ -125,6 +133,12 @@ static int dispatch_argv0(const char *name, int argc, char *const argv[])
         strcmp(name, "xcode-select") == 0 ||
         strcmp(name, "xcrun") == 0) {
         return masa_sys_dispatch(argc, argv);
+    }
+    if (strcmp(name, "pbcopy") == 0) {
+        return masa_pbcopy_dispatch(argc - 1, &argv[1]);
+    }
+    if (strcmp(name, "pbpaste") == 0) {
+        return masa_pbpaste_dispatch(argc - 1, &argv[1]);
     }
     if (masa_tool_is_shim(name)) {
         return masa_tool_dispatch(name, argc - 1, &argv[1]);
@@ -178,6 +192,12 @@ int masa_main(int argc, char *const argv[])
     if (strcmp(command, "shell") == 0) {
         return masa_shell_main(argc - 2, &argv[2]);
     }
+    if (strcmp(command, "pbcopy") == 0) {
+        return masa_pbcopy_dispatch(argc - 2, &argv[2]);
+    }
+    if (strcmp(command, "pbpaste") == 0) {
+        return masa_pbpaste_dispatch(argc - 2, &argv[2]);
+    }
     if (strcmp(command, "init-shims") == 0) {
         if (argc < 3 || argv[2] == NULL) {
             fprintf(stderr, "masa: init-shims: missing directory\n");
@@ -201,7 +221,9 @@ int masa_main(int argc, char *const argv[])
     }
     if (strcmp(command, "brew") == 0) {
         if (argc < 3 || argv[2] == NULL) {
-            fprintf(stderr, "masa: brew: missing subcommand (lint | build)\n");
+            fprintf(stderr,
+                    "masa: brew: missing subcommand "
+                    "(lint | build | tap | fetch | update | info | search)\n");
             return 2;
         }
         return masa_brew_main(argc - 2, &argv[2]);

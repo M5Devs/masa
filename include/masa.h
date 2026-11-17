@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.7.0"
+#define MASA_VERSION "1.8.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -79,6 +79,10 @@ extern "C" {
 /* Set to 1 to disable the cross-architecture bridge entirely, so an arm64
  * image on an x86_64 host reports the plain architecture mismatch. */
 #define MASA_DANROOT_NO_BRIDGE_ENV "MASA_DANROOT_NO_BRIDGE"
+
+/* Overrides the file the pbcopy/pbpaste shims fall back to when no host
+ * clipboard tool is reachable (headless containers, CI, Colab). */
+#define MASA_CLIPBOARD_FILE_ENV "MASA_CLIPBOARD_FILE"
 
 /* Number of frames the AppKit SDL2 run loop draws before returning, so an
  * automated test can drive a GUI program headlessly and exit cleanly.
@@ -356,6 +360,20 @@ int masa_exec_run_all(const char *dir, char *const *const *cmds, size_t count);
  */
 int masa_shell_main(int argc, char *const argv[]);
 
+/*
+ * `pbcopy` / `pbpaste` shims (implemented in src/tool_shims.c).  `pbcopy`
+ * reads standard input and stores it on the clipboard; `pbpaste` writes
+ * the clipboard to standard output.  A host clipboard tool (wl-copy/
+ * wl-paste, xclip or xsel) is used when one is reachable, and a clean
+ * local clipboard file otherwise, so a round trip works deterministically
+ * in a headless container.  Each returns the process exit status.
+ */
+int masa_pbcopy_dispatch(int argc, char *const argv[]);
+int masa_pbpaste_dispatch(int argc, char *const argv[]);
+
+/* 1 when name (a bare basename) is one of the clipboard shims. */
+int masa_clipboard_is_shim(const char *name);
+
 /* ------------------------------------------------------------------ */
 /* Xcode project builder (src/xcodeproj.c)                            */
 /* ------------------------------------------------------------------ */
@@ -609,6 +627,67 @@ int masa_brew_fetch_main(int argc, char *const argv[]);
 int masa_brew_fetch_archive(const char *url, const char *expect_sha,
                             const char *out_dir, char *out_path,
                             size_t out_path_cap);
+
+/* ------------------------------------------------------------------ */
+/* Online formula index (masa brew update/info/search)                */
+/* ------------------------------------------------------------------ */
+
+/* Directory the Homebrew JSON index is cached in (default under $HOME). */
+#define MASA_BREW_CACHE_ENV "MASA_BREW_CACHE"
+
+/*
+ * Base URL the formula index is fetched from.  Defaults to the public
+ * Homebrew API; a mirror or a local path (a `file://` URL, for offline
+ * tests) can be substituted, in which case `masa brew update` fetches
+ * <base>/formula.json.
+ */
+#define MASA_BREW_API_BASE_ENV "MASA_BREW_API_BASE"
+#define MASA_BREW_API_BASE_DEFAULT "https://formulae.brew.sh/api"
+
+/*
+ * One formula from the cached JSON index: the fields `masa brew info`
+ * prints plus the `dependencies` list.
+ */
+struct masa_brew_formula_info {
+    char *name;
+    char *version;      /* first entry of versions.stable, or the string */
+    char *desc;
+    char *homepage;
+    char **deps;
+    size_t dep_count;
+};
+
+/*
+ * Release the memory owned by a formula-info record (safe on a zeroed
+ * struct).
+ */
+void masa_brew_formula_info_free(struct masa_brew_formula_info *info);
+
+/*
+ * Search a formula.json document (len bytes) for the formula named name
+ * (case-insensitive).  Returns 0 and fills *out on success, or -1 when no
+ * such formula is present.
+ */
+int masa_brew_info_lookup(const char *text, size_t len, const char *name,
+                          struct masa_brew_formula_info *out);
+
+/*
+ * Collect every formula in a formula.json document whose name contains
+ * query (case-insensitive).  Returns a malloc'd, NULL-terminated array of
+ * malloc'd names (count written into *count), or NULL when there is no
+ * match; the caller frees each name and the array.
+ */
+char **masa_brew_search(const char *text, size_t len, const char *query,
+                        size_t *count);
+
+/*
+ * `masa brew update`, `masa brew info <name>` and `masa brew search
+ * <query>`.  update fetches <base>/formula.json into the cache; info and
+ * search read it.  Returns the process exit status.
+ */
+int masa_brew_update_main(int argc, char *const argv[]);
+int masa_brew_info_main(int argc, char *const argv[]);
+int masa_brew_search_main(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
 /* Doctor (src/doctor.c)                                              */

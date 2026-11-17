@@ -82,6 +82,84 @@ int masa_gui_pump(struct masa_pty *pty, VTerm *vt, int idle_ms, int max_ms);
 /* Release everything masa_gui_init() created.  Passing NULL is a no-op. */
 void masa_gui_shutdown(struct masa_gui *gui);
 
+/* ------------------------------------------------------------------ */
+/* Tabs, scrollback and clipboard (src/gui_term.c)                     */
+/* ------------------------------------------------------------------ */
+
+/* Upper bounds: at most 16 tabs, each retaining 1000 scrollback lines. */
+#define MASA_GUI_MAX_TABS 16
+#define MASA_GUI_SCROLLBACK 1000
+
+/* Number of open tabs. */
+int masa_gui_tab_count(const struct masa_gui *gui);
+
+/* Index of the active tab (0-based). */
+int masa_gui_tab_active(const struct masa_gui *gui);
+
+/* Which tab the pixel (x, y) falls on in the tab bar, or -1 when the point
+ * is not over a tab.  Used to switch tabs by clicking. */
+int masa_gui_tab_at(const struct masa_gui *gui, int x, int y);
+
+/* Open a new tab (with its own libvterm screen) and make it active.
+ * Returns the new tab's index, or -1 when the tab limit is reached. */
+int masa_gui_tab_new(struct masa_gui *gui);
+
+/* Make tab `index` active.  Returns 0 on success and -1 on a bad index. */
+int masa_gui_tab_select(struct masa_gui *gui, int index);
+
+/* Close tab `index`, reaping its PTY and freeing its vterm and scrollback.
+ * Returns the number of tabs remaining, or -1 on a bad index.  Closing the
+ * last tab leaves zero tabs; the caller decides whether to exit. */
+int masa_gui_tab_close(struct masa_gui *gui, int index);
+
+/* The embedded PTY of tab `index` (open it with masa_gui_tab_open_pty()),
+ * or NULL on a bad index. */
+struct masa_pty *masa_gui_tab_pty(struct masa_gui *gui, int index);
+
+/* Open tab `index`'s PTY at the current grid size.  Returns 0 on success. */
+int masa_gui_tab_open_pty(struct masa_gui *gui, int index,
+                          char *const argv[], char *const envp[]);
+
+/* The title tab `index` reported (OSC 0/2), or "" when none. */
+const char *masa_gui_tab_title(const struct masa_gui *gui, int index);
+
+/* Feed bytes into a specific tab's screen. */
+void masa_gui_tab_feed(struct masa_gui *gui, int index, const char *bytes,
+                       size_t len);
+
+/* Scrollback for the active tab. */
+int masa_gui_scrollback_count(const struct masa_gui *gui);
+
+/* Copy retained scrollback line `index` (0 = oldest) into out as UTF-8,
+ * without a trailing newline.  Returns the number of bytes written. */
+size_t masa_gui_scrollback_line(const struct masa_gui *gui, int index,
+                                char *out, size_t cap);
+
+/* Scroll the view by `lines` (positive = back into history, negative =
+ * toward the live view).  Returns the resulting offset (0 = live). */
+int masa_gui_scroll(struct masa_gui *gui, int lines);
+
+/* The current scroll offset (0 = live). */
+int masa_gui_scroll_offset(const struct masa_gui *gui);
+
+/* Snap the view back to the live screen. */
+void masa_gui_scroll_reset(struct masa_gui *gui);
+
+/* Translate clipboard text into the bytes the child expects and store them
+ * in out (a paste).  Returns the number of bytes written. */
+size_t masa_gui_paste(struct masa_gui *gui, const char *text, char *out,
+                      size_t outcap);
+
+/* Record a selection between two screen cells (live-view row/col). */
+void masa_gui_set_selection(struct masa_gui *gui, int r0, int c0, int r1,
+                            int c1);
+void masa_gui_clear_selection(struct masa_gui *gui);
+
+/* Copy the current selection into out as UTF-8 (one line per row, trailing
+ * blanks trimmed).  Returns the number of bytes written (0 = no selection). */
+size_t masa_gui_copy_selection(const struct masa_gui *gui, char *out,
+                               size_t cap);
+
 /*
  * `masa-term` entry point: open a PTY running `masa shell`, then run the
  * SDL event loop until the window is closed.  Recognises:
