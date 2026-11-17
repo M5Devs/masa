@@ -23,12 +23,13 @@
 #define MASA_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.6.1"
+#define MASA_VERSION "1.7.0"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
@@ -416,6 +417,41 @@ int masa_is_macho64(const char *path);
 int masa_codesign_dispatch(int argc, char *const argv[]);
 
 /* ------------------------------------------------------------------ */
+/* SHA-256 (src/sha256.c)                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A self-contained, clean-room SHA-256 (FIPS 180-4) with no external
+ * dependency, used by `masa brew fetch` to verify a downloaded archive
+ * against the `sha256` field of a formula or cask.  The context is a
+ * plain struct so callers can keep it on the stack.
+ */
+struct masa_sha256_ctx {
+    uint32_t state[8];
+    uint64_t bitlen;            /* message length in bits so far */
+    unsigned char block[64];    /* pending input, blocklen bytes used */
+    size_t blocklen;
+};
+
+void masa_sha256_init(struct masa_sha256_ctx *ctx);
+void masa_sha256_update(struct masa_sha256_ctx *ctx, const void *data,
+                        size_t len);
+/* Write the 32-byte digest into out and finalise ctx. */
+void masa_sha256_final(struct masa_sha256_ctx *ctx, unsigned char out[32]);
+
+/*
+ * Hash a whole buffer (len bytes) and write the lowercase hex digest into
+ * hex (65 bytes: 64 hex digits plus the NUL).  Returns 0 on success.
+ */
+int masa_sha256_buffer(const void *data, size_t len, char hex[65]);
+
+/*
+ * Hash the file at path and write the lowercase hex digest into hex
+ * (65 bytes).  Returns 0 on success and -1 when the file cannot be read.
+ */
+int masa_sha256_file(const char *path, char hex[65]);
+
+/* ------------------------------------------------------------------ */
 /* Homebrew formula linter and builder (src/brew.c)                   */
 /* ------------------------------------------------------------------ */
 
@@ -490,6 +526,89 @@ int masa_brew_lint_formula(const struct masa_brew_formula *f,
  * Returns the process exit status.
  */
 int masa_brew_main(int argc, char *const argv[]);
+
+/* ------------------------------------------------------------------ */
+/* Homebrew cask linter (src/brew.c)                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Parsed view of the parts of a Homebrew cask the linter and fetcher
+ * need.  A cask is the `cask "name" do ... end` form that installs a
+ * prebuilt `.app` (a `.dmg`/`.zip`/`.pkg` download) rather than building
+ * from source.  Every string is owned by the struct and released by
+ * masa_brew_cask_free(); the strings are NULL when the field is absent.
+ */
+struct masa_brew_cask {
+    char *token;        /* the cask name: `cask "openrom"` -> "openrom" */
+    char *version;
+    char *sha256;
+    char *url;
+    char *name;         /* the human-readable `name "..."` */
+    char *desc;
+    char *homepage;
+    char *app;          /* artifact: `app "OpenROM.app"` */
+    int has_app;        /* an `app` artifact is present */
+};
+
+/*
+ * Parse a cask held in memory (len bytes, need not be NUL-terminated).
+ * Returns 0 on success and -1 on a document that is not a cask, writing
+ * a reason into err (when errcap > 0).  On failure any partially built
+ * state is released.
+ */
+int masa_brew_cask_parse(const char *text, size_t len,
+                         struct masa_brew_cask *out,
+                         char *err, size_t errcap);
+
+/* Release the memory owned by a parsed cask (safe on a zeroed struct). */
+void masa_brew_cask_free(struct masa_brew_cask *c);
+
+/*
+ * Lint a parsed cask: check the required fields (`version`, `sha256`,
+ * `url`, an artifact such as `app "..."`) and warn about a missing
+ * `homepage`/`desc`.  Returns 0 when the cask is valid and non-zero
+ * otherwise.  `label` names the source in diagnostics.
+ */
+int masa_brew_lint_cask(const struct masa_brew_cask *c, const char *label);
+
+/* ------------------------------------------------------------------ */
+/* Online tap and fetch (src/brew.c)                                  */
+/* ------------------------------------------------------------------ */
+
+/* Environment variable overriding the tap directory (default under $HOME). */
+#define MASA_BREW_TAPS_ENV "MASA_BREW_TAPS"
+
+/*
+ * Environment variable overriding the tap base URL.  Defaults to
+ * https://github.com; a mirror or a local path (for offline tests) can be
+ * substituted, in which case `masa brew tap <user>/<repo>` clones
+ * <base>/<user>/homebrew-<repo>.
+ */
+#define MASA_BREW_TAP_BASE_ENV "MASA_BREW_TAP_BASE"
+#define MASA_BREW_TAP_BASE_DEFAULT "https://github.com"
+
+/*
+ * `masa brew tap <user/repo>` (clone or update
+ * https://github.com/<user>/homebrew-<repo>) and
+ * `masa brew fetch <formula_or_cask.rb> [-o <dir>]` (download the `url`
+ * and verify it against the `sha256` field).  Returns the process exit
+ * status.
+ */
+int masa_brew_tap_main(int argc, char *const argv[]);
+int masa_brew_fetch_main(int argc, char *const argv[]);
+
+/*
+ * Fetch the archive named by `url` into out_dir (the file keeps the
+ * URL's basename), hash it and compare the digest against `expect_sha`.
+ * A `file://` URL is copied from the local filesystem, so tests run
+ * offline; http/https are downloaded with `curl -fSL`.  Returns 0 when
+ * the archive was fetched and the digest matched, 1 on a digest mismatch
+ * and -1 on any other failure.  On success out_path (when non-NULL)
+ * receives the saved file path.
+ */
+int masa_brew_fetch_archive(const char *url, const char *expect_sha,
+                            const char *out_dir, char *out_path,
+                            size_t out_path_cap);
 
 /* ------------------------------------------------------------------ */
 /* Doctor (src/doctor.c)                                              */

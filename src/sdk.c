@@ -950,6 +950,212 @@ static const char *cocoa_h(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Partial stubs for Flutter/Dart-style system binaries               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The frameworks and libraries a Flutter/Dart desktop binary imports at
+ * load time.  Only the symbols the loader actually shims are advertised,
+ * so a binary that links against these stubs resolves every import and
+ * runs (see src/danroot.c).  Metal/IOKit have no functional shim - their
+ * symbols bind to safe no-ops - but they must exist so the link succeeds.
+ */
+static const char *metal_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/Metal.framework/Metal'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _MTLCreateSystemDefaultDevice,"
+        " _MTLCopyAllDevices, _MTLCreateSystemDefaultDeviceWithOptions ]\n"
+        "...\n";
+}
+
+static const char *quartzcore_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/QuartzCore.framework"
+        "/QuartzCore'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _CACurrentMediaTime, _CATransactionBegin,"
+        " _CATransactionCommit, _CATransactionFlush ]\n"
+        "...\n";
+}
+
+static const char *security_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/Security.framework"
+        "/Security'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _SecRandomCopyBytes ]\n"
+        "...\n";
+}
+
+static const char *iokit_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/System/Library/Frameworks/IOKit.framework/IOKit'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _IOMasterPort, _IOServiceMatching,"
+        " _IOServiceGetMatchingService, _IOObjectRelease ]\n"
+        "...\n";
+}
+
+static const char *libz_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/usr/lib/libz.1.dylib'\n"
+        "current-version: 1.2.11\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ _deflate, _deflateEnd, _deflateInit_,"
+        " _inflate, _inflateEnd, _inflateInit_, _crc32, _adler32,"
+        " _compress, _uncompress, _zlibVersion ]\n"
+        "...\n";
+}
+
+static const char *libcxx_tbd(void)
+{
+    return
+        "--- !tapi-tbd\n"
+        "tbd-version:     4\n"
+        "targets:         [ arm64-macos, x86_64-macos ]\n"
+        "install-name:    '/usr/lib/libc++.1.dylib'\n"
+        "current-version: 1.0\n"
+        "compatibility-version: 1.0\n"
+        "exports:\n"
+        "  - targets:         [ arm64-macos, x86_64-macos ]\n"
+        "    symbols:         [ ]\n"
+        "...\n";
+}
+
+static const char *metal_h(void)
+{
+    return
+        "#ifndef MASA_STUB_METAL_H\n"
+        "#define MASA_STUB_METAL_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's Metal.  Only the device handle a\n"
+        " * Flutter/Dart engine creates at startup is declared; the Danroot\n"
+        " * loader returns NULL from MTLCreateSystemDefaultDevice (a device\n"
+        " * is optional, and a NULL return is handled by every caller).\n"
+        " */\n"
+        "#include <stddef.h>\n"
+        "\n"
+        "typedef struct MTLDevice *id;\n"
+        "\n"
+        "id MTLCreateSystemDefaultDevice(void);\n"
+        "\n"
+        "#endif /* MASA_STUB_METAL_H */\n";
+}
+
+static const char *quartzcore_h(void)
+{
+    return
+        "#ifndef MASA_STUB_QUARTZCORE_H\n"
+        "#define MASA_STUB_QUARTZCORE_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's QuartzCore.  CACurrentMediaTime is\n"
+        " * the monotonic clock the Dart/Flutter engine uses for its frame\n"
+        " * timing; the Danroot loader supplies a real monotonic value.\n"
+        " */\n"
+        "\n"
+        "double CACurrentMediaTime(void);\n"
+        "\n"
+        "#endif /* MASA_STUB_QUARTZCORE_H */\n";
+}
+
+static const char *security_h(void)
+{
+    return
+        "#ifndef MASA_STUB_SECURITY_H\n"
+        "#define MASA_STUB_SECURITY_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's Security framework.  Only the\n"
+        " * random-number call is declared; the Danroot loader fills the\n"
+        " * buffer from the host CSPRNG (/dev/urandom).\n"
+        " */\n"
+        "#include <stddef.h>\n"
+        "\n"
+        "/* Opaque Security framework error code; errSecSuccess is 0. */\n"
+        "typedef int OSStatus;\n"
+        "\n"
+        "OSStatus SecRandomCopyBytes(void *rnd, size_t count, void *bytes);\n"
+        "\n"
+        "#endif /* MASA_STUB_SECURITY_H */\n";
+}
+
+static const char *iokit_h(void)
+{
+    return
+        "#ifndef MASA_STUB_IOKIT_H\n"
+        "#define MASA_STUB_IOKIT_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room subset of Apple's IOKit.  Only the bootstrap-port\n"
+        " * symbol a Flutter/Dart binary references is declared; the Danroot\n"
+        " * loader returns a clean error (a non-zero kern_return_t) rather\n"
+        " * than crashing when the port cannot be obtained.\n"
+        " */\n"
+        "#include <stdint.h>\n"
+        "\n"
+        "typedef uint32_t mach_port_t;\n"
+        "typedef int kern_return_t;\n"
+        "\n"
+        "kern_return_t IOMasterPort(mach_port_t bootstrapPort,\n"
+        "                           mach_port_t *masterPort);\n"
+        "\n"
+        "#endif /* MASA_STUB_IOKIT_H */\n";
+}
+
+static const char *zlib_h(void)
+{
+    return
+        "#ifndef MASA_STUB_ZLIB_H\n"
+        "#define MASA_STUB_ZLIB_H\n"
+        "\n"
+        "/*\n"
+        " * Clean-room placeholder for <zlib.h>.  The stub libz.tbd exports no\n"
+        " * symbols, so a program that actually calls zlib is rejected at\n"
+        " * link time; this header only lets a translation unit that merely\n"
+        " * includes it compile.\n"
+        " */\n"
+        "\n"
+        "#endif /* MASA_STUB_ZLIB_H */\n";
+}
+
+/* ------------------------------------------------------------------ */
 /* sdk init-stub                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -1001,7 +1207,24 @@ static const struct stub_file stub_files[] = {
     { "System/Library/Frameworks/AppKit.framework/Headers/AppKit.h",
       appkit_h },
     { "System/Library/Frameworks/Cocoa.framework/Cocoa.tbd", cocoa_tbd },
-    { "System/Library/Frameworks/Cocoa.framework/Headers/Cocoa.h", cocoa_h }
+    { "System/Library/Frameworks/Cocoa.framework/Headers/Cocoa.h", cocoa_h },
+    /* Partial stubs for Flutter/Dart-style system binaries. */
+    { "System/Library/Frameworks/Metal.framework/Metal.tbd", metal_tbd },
+    { "System/Library/Frameworks/Metal.framework/Headers/Metal.h", metal_h },
+    { "System/Library/Frameworks/QuartzCore.framework/QuartzCore.tbd",
+      quartzcore_tbd },
+    { "System/Library/Frameworks/QuartzCore.framework/Headers/QuartzCore.h",
+      quartzcore_h },
+    { "System/Library/Frameworks/Security.framework/Security.tbd",
+      security_tbd },
+    { "System/Library/Frameworks/Security.framework/Headers/Security.h",
+      security_h },
+    { "System/Library/Frameworks/IOKit.framework/IOKit.tbd", iokit_tbd },
+    { "System/Library/Frameworks/IOKit.framework/Headers/IOKit.h", iokit_h },
+    { "usr/lib/libz.tbd", libz_tbd },
+    { "usr/lib/libz.1.tbd", libz_tbd },
+    { "usr/include/zlib.h", zlib_h },
+    { "usr/lib/libc++.1.tbd", libcxx_tbd }
 };
 
 static int sdk_init_stub(const char *dir)
@@ -1042,8 +1265,30 @@ static int sdk_init_stub(const char *dir)
         }
     }
 
+    /*
+     * libc++.tbd is a symlink to libc++.1.tbd, matching the layout of a
+     * real SDK (where libc++.dylib points at libc++.1.dylib).  It is
+     * created separately so the stub table stays a plain file list.  The
+     * target is the bare basename so the link is relative and valid.
+     */
+    {
+        char link[MASA_PATH_MAX];
+
+        if (snprintf(link, sizeof(link), "%s/usr/lib/libc++.tbd", dir) >=
+            (int)sizeof(link)) {
+            fprintf(stderr, "masa: sdk init-stub: path too long\n");
+            return 1;
+        }
+        if (masa_symlink_or_copy("libc++.1.tbd", link) != 0) {
+            fprintf(stderr, "masa: sdk init-stub: cannot link '%s': %s\n", link,
+                    strerror(errno));
+            return 1;
+        }
+    }
+
     printf("masa: wrote stub SDK to %s\n", dir);
     printf("  %s/%s\n", dir, MASA_SDK_LIBSYSTEM_RELPATH);
+    printf("  includes partial Metal, QuartzCore, Security and IOKit stubs\n");
     printf("Use it with: MASA_SDK_PATH=%s masa exec make\n", dir);
     return 0;
 }

@@ -1186,6 +1186,86 @@ static int dr_shim_mach_timebase_info(void *info)
     return 0;
 }
 
+/* --- QuartzCore / Security / Metal (Flutter/Dart-style binaries) --- */
+
+/*
+ * A minimal clean-room subset of the system frameworks a Flutter/Dart
+ * desktop binary imports at load time.  CACurrentMediaTime is the
+ * monotonic clock the engine drives its frame timing from, so it maps
+ * onto the host monotonic clock (in seconds, as on macOS).
+ * SecRandomCopyBytes fills a buffer from the host CSPRNG, exactly the
+ * contract the engine relies on for its RNG seed.  Metal's device
+ * factory returns NULL cleanly: a program that probes for a GPU gets
+ * "no device" (which every caller handles) instead of a crash, and a
+ * note is written once so the reason is visible.
+ */
+static double dr_shim_ca_current_media_time(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0.0;
+    }
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
+
+/* Apple's errSecSuccess / kIOReturnSuccess are both 0. */
+static int dr_shim_sec_random_copy_bytes(void *rnd, size_t count, void *bytes)
+{
+    unsigned char *out = (unsigned char *)bytes;
+    size_t done = 0;
+    FILE *fp;
+
+    (void)rnd;
+    if (bytes == NULL && count > 0) {
+        return -1;
+    }
+    fp = fopen("/dev/urandom", "rb");
+    if (fp == NULL) {
+        /* No host CSPRNG: fail rather than hand back predictable bytes. */
+        return -1;
+    }
+    while (done < count) {
+        size_t got = fread(out + done, 1, count - done, fp);
+
+        if (got == 0) {
+            fclose(fp);
+            return -1;
+        }
+        done += got;
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void *dr_shim_mtl_create_system_default_device(void)
+{
+    static int noted = 0;
+
+    if (!noted) {
+        fprintf(stderr,
+                "masa: danroot: Metal is not emulated; "
+                "MTLCreateSystemDefaultDevice() returns NULL\n");
+        noted = 1;
+    }
+    return NULL;
+}
+
+static void *dr_shim_mtl_copy_all_devices(void)
+{
+    return NULL;
+}
+
+/* IOKit's IOMasterPort: report a clean error, never a crash. */
+static int dr_shim_io_master_port(uint32_t bootstrap, uint32_t *master)
+{
+    (void)bootstrap;
+    if (master != NULL) {
+        *master = 0;
+    }
+    return -1; /* a non-zero kern_return_t (no IOKit on this host) */
+}
+
 /* --- stack protector ---------------------------------------------- */
 
 /*
@@ -1299,6 +1379,13 @@ static const struct dr_symbol dr_symbols[] = {
     /* Mach time and task */
     { "_mach_absolute_time",  (void *)dr_shim_mach_absolute_time },
     { "_mach_timebase_info",  (void *)dr_shim_mach_timebase_info },
+    /* QuartzCore / Security / Metal (Flutter/Dart-style binaries) */
+    { "_CACurrentMediaTime",  (void *)dr_shim_ca_current_media_time },
+    { "_SecRandomCopyBytes",  (void *)dr_shim_sec_random_copy_bytes },
+    { "_MTLCreateSystemDefaultDevice",
+                              (void *)dr_shim_mtl_create_system_default_device },
+    { "_MTLCopyAllDevices",   (void *)dr_shim_mtl_copy_all_devices },
+    { "_IOMasterPort",        (void *)dr_shim_io_master_port },
     /* stack protector */
     { "___stack_chk_fail",  (void *)dr_shim_stack_chk_fail },
     { "___stack_chk_guard", (void *)&dr_stack_chk_guard },
@@ -2635,6 +2722,31 @@ static int dr_is_system_stub(const char *name)
            strcmp(name, "/System/Library/Frameworks/Cocoa.framework"
                         "/Cocoa") == 0 ||
            strcmp(name, "Cocoa") == 0 ||
+           /* QuartzCore framework (CACurrentMediaTime) */
+           strcmp(name, "/System/Library/Frameworks/QuartzCore.framework"
+                        "/QuartzCore") == 0 ||
+           strcmp(name, "QuartzCore") == 0 ||
+           /* Security framework (SecRandomCopyBytes) */
+           strcmp(name, "/System/Library/Frameworks/Security.framework"
+                        "/Security") == 0 ||
+           strcmp(name, "Security") == 0 ||
+           /* Metal framework (device factory returns NULL) */
+           strcmp(name, "/System/Library/Frameworks/Metal.framework"
+                        "/Metal") == 0 ||
+           strcmp(name, "Metal") == 0 ||
+           /* IOKit framework (IOMasterPort reports a clean error) */
+           strcmp(name, "/System/Library/Frameworks/IOKit.framework"
+                        "/IOKit") == 0 ||
+           strcmp(name, "IOKit") == 0 ||
+           /* zlib and libc++ (Flutter/Dart-style binaries) */
+           strcmp(name, "/usr/lib/libz.1.dylib") == 0 ||
+           strcmp(name, "libz.1.dylib") == 0 ||
+           strcmp(name, "/usr/lib/libz.dylib") == 0 ||
+           strcmp(name, "libz.dylib") == 0 ||
+           strcmp(name, "/usr/lib/libc++.1.dylib") == 0 ||
+           strcmp(name, "libc++.1.dylib") == 0 ||
+           strcmp(name, "/usr/lib/libc++.dylib") == 0 ||
+           strcmp(name, "libc++.dylib") == 0 ||
            /* The Objective-C runtime */
            strcmp(name, "/usr/lib/libobjc.A.dylib") == 0 ||
            strcmp(name, "libobjc.A.dylib") == 0 ||

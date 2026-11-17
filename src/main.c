@@ -35,9 +35,13 @@ static void print_usage(FILE *out, const char *prog)
             "  %s sdk init-stub <dir>      Write a clean-room stub SDK to <dir>\n"
             "  %s xcode build <App.xcodeproj> [-o <dir>] [--bundle]\n"
             "                              Build an Xcode project without Xcode\n"
-            "  %s brew lint <formula.rb>   Lint a Homebrew formula\n"
+            "  %s brew lint <formula.rb|cask.rb>\n"
+            "                              Lint a Homebrew formula or cask\n"
             "  %s brew build <formula.rb> --source <dir> [--prefix <dir>]\n"
             "                              Build a Homebrew formula into a Cellar\n"
+            "  %s brew tap <user/repo>     Clone/update a Homebrew tap\n"
+            "  %s brew fetch <formula.rb> [-o <dir>]\n"
+            "                              Download and verify a formula/cask URL\n"
             "  %s swift build [dir]        Build a Swift package (or swiftc wrapper)\n"
             "  %s swift info [dir]         Report a Package.swift's name and layout\n"
             "  %s doctor                   Check local macOS cross-build readiness\n"
@@ -59,6 +63,8 @@ static void print_usage(FILE *out, const char *prog)
             "  MASA_SWIFTC     host swift compiler the swift shims forward to\n"
             "  MASA_SHIM_DIR   directory holding the argv[0] shims\n"
             "  MASA_BREW_PREFIX  prefix for `masa brew build` (default: %s)\n"
+            "  MASA_BREW_TAPS  directory `masa brew tap` clones into\n"
+            "  MASA_BREW_TAP_BASE  base URL for `masa brew tap` (default: https://github.com)\n"
             "  MASA_KEEP_PS1   set to 1 so `masa shell` keeps the caller's prompt\n"
             "  MASA_DANROOT_ROOT  virtual root for `masa run` path virtualization\n"
             "\n"
@@ -69,7 +75,7 @@ static void print_usage(FILE *out, const char *prog)
             MASA_VERSION,
             prog, prog, prog, prog, prog, prog, prog, prog,
             prog, prog, prog, prog, prog, prog, prog, prog,
-            prog, prog, prog, prog,
+            prog, prog, prog, prog, prog, prog,
             MASA_DEFAULT_TARGET, MASA_BREW_DEFAULT_PREFIX);
 }
 

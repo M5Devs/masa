@@ -1143,8 +1143,631 @@ static int brew_build(int argc, char *const argv[])
 }
 
 /* ------------------------------------------------------------------ */
+/* Homebrew cask parser and linter                                    */
+/* ------------------------------------------------------------------ */
+
+/* Locate `cask "name" do` and return a fresh copy of the name, or NULL. */
+static char *find_cask_token(const char *text)
+{
+    const char *p = text;
+
+    while (*p != '\0') {
+        const char *eol = strchr(p, '\n');
+        size_t line_len = (eol != NULL) ? (size_t)(eol - p) : strlen(p);
+        char *line = malloc(line_len + 1);
+        char *tok = NULL;
+
+        if (line == NULL) {
+            return NULL;
+        }
+        memcpy(line, p, line_len);
+        line[line_len] = '\0';
+
+        {
+            const char *s = ltrim(line);
+
+            if (strncmp(s, "cask", 4) == 0 &&
+                (s[4] == ' ' || s[4] == '\t')) {
+                const char *q = s + 4;
+
+                while (*q == ' ' || *q == '\t') {
+                    q++;
+                }
+                tok = read_quoted(q, NULL);
+            }
+        }
+        free(line);
+        if (tok != NULL) {
+            return tok;
+        }
+        if (eol == NULL) {
+            break;
+        }
+        p = eol + 1;
+    }
+    return NULL;
+}
+
+void masa_brew_cask_free(struct masa_brew_cask *c)
+{
+    if (c == NULL) {
+        return;
+    }
+    free(c->token);
+    free(c->version);
+    free(c->sha256);
+    free(c->url);
+    free(c->name);
+    free(c->desc);
+    free(c->homepage);
+    free(c->app);
+    memset(c, 0, sizeof(*c));
+}
+
+int masa_brew_cask_parse(const char *text, size_t len,
+                         struct masa_brew_cask *out,
+                         char *err, size_t errcap)
+{
+    const char *p;
+    int ok = 1;
+
+    if (err != NULL && errcap > 0) {
+        err[0] = '\0';
+    }
+    if (out == NULL) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (text == NULL || len == 0) {
+        if (err != NULL && errcap > 0) {
+            snprintf(err, errcap, "empty cask");
+        }
+        return -1;
+    }
+
+    out->token = find_cask_token(text);
+    if (out->token == NULL) {
+        if (err != NULL && errcap > 0) {
+            snprintf(err, errcap, "no `cask \"<name>\" do` declaration");
+        }
+        return -1;
+    }
+
+    p = text;
+    while (*p != '\0') {
+        const char *eol = strchr(p, '\n');
+        size_t line_len = (eol != NULL) ? (size_t)(eol - p) : strlen(p);
+        char *line = malloc(line_len + 1);
+        char *value;
+
+        if (line == NULL) {
+            ok = 0;
+            break;
+        }
+        memcpy(line, p, line_len);
+        line[line_len] = '\0';
+
+        if ((value = scalar_field(line, "version")) != NULL) {
+            ok = (set_field(&out->version, value) == 0);
+            free(value);
+        } else if ((value = scalar_field(line, "sha256")) != NULL) {
+            ok = (set_field(&out->sha256, value) == 0);
+            free(value);
+        } else if ((value = scalar_field(line, "url")) != NULL) {
+            ok = (set_field(&out->url, value) == 0);
+            free(value);
+        } else if ((value = scalar_field(line, "name")) != NULL) {
+            ok = (set_field(&out->name, value) == 0);
+            free(value);
+        } else if ((value = scalar_field(line, "desc")) != NULL) {
+            ok = (set_field(&out->desc, value) == 0);
+            free(value);
+        } else if ((value = scalar_field(line, "homepage")) != NULL) {
+            ok = (set_field(&out->homepage, value) == 0);
+            free(value);
+        } else if (!out->has_app &&
+                   ((value = scalar_field(line, "app")) != NULL ||
+                    (value = scalar_field(line, "pkg")) != NULL ||
+                    (value = scalar_field(line, "binary")) != NULL)) {
+            /* The artifact that lands in /Applications.  app/pkg/binary
+             * are the three shapes a cask uses; the first one wins. */
+            ok = (set_field(&out->app, value) == 0);
+            out->has_app = 1;
+            free(value);
+        }
+
+        free(line);
+        if (!ok) {
+            break;
+        }
+        if (eol == NULL) {
+            break;
+        }
+        p = eol + 1;
+    }
+
+    if (!ok) {
+        masa_brew_cask_free(out);
+        if (err != NULL && errcap > 0) {
+            snprintf(err, errcap, "out of memory");
+        }
+        return -1;
+    }
+    return 0;
+}
+
+int masa_brew_lint_cask(const struct masa_brew_cask *c, const char *label)
+{
+    const char *src = (label != NULL) ? label : "cask";
+    int missing = 0;
+
+    if (c->version == NULL || c->version[0] == '\0') {
+        fprintf(stderr,
+                "masa: brew lint: %s: missing required field 'version'\n", src);
+        missing = 1;
+    }
+    if (c->sha256 == NULL || c->sha256[0] == '\0') {
+        fprintf(stderr,
+                "masa: brew lint: %s: missing required field 'sha256'\n", src);
+        missing = 1;
+    }
+    if (c->url == NULL || c->url[0] == '\0') {
+        fprintf(stderr, "masa: brew lint: %s: missing required field 'url'\n",
+                src);
+        missing = 1;
+    }
+    if (!c->has_app) {
+        fprintf(stderr,
+                "masa: brew lint: %s: missing required artifact "
+                "(app/pkg/binary \"...\")\n", src);
+        missing = 1;
+    }
+    if (c->homepage == NULL || c->homepage[0] == '\0') {
+        fprintf(stderr,
+                "masa: brew lint: %s: warning: no 'homepage'\n", src);
+    }
+    if (c->desc == NULL || c->desc[0] == '\0') {
+        fprintf(stderr, "masa: brew lint: %s: warning: no 'desc'\n", src);
+    }
+
+    if (missing) {
+        return 1;
+    }
+
+    printf("%s: ok (cask)\n", src);
+    printf("  token:    %s\n", c->token);
+    printf("  version:  %s\n", c->version);
+    printf("  sha256:   %s\n", c->sha256);
+    printf("  url:      %s\n", c->url);
+    if (c->name != NULL) {
+        printf("  name:     %s\n", c->name);
+    }
+    if (c->homepage != NULL) {
+        printf("  homepage: %s\n", c->homepage);
+    }
+    if (c->desc != NULL) {
+        printf("  desc:     %s\n", c->desc);
+    }
+    printf("  artifact: %s\n", c->app);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Online tap and fetch                                               */
+/* ------------------------------------------------------------------ */
+
+/* Case-insensitive ASCII equality (no strcasecmp dependency). */
+static int str_ieq(const char *a, const char *b)
+{
+    while (*a != '\0' && *b != '\0') {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+
+        if (ca != cb) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/* Copy src to dst in binary mode.  Returns 0 on success. */
+static int copy_file(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    FILE *out;
+    unsigned char buf[65536];
+    size_t got;
+
+    if (in == NULL) {
+        return -1;
+    }
+    out = fopen(dst, "wb");
+    if (out == NULL) {
+        fclose(in);
+        return -1;
+    }
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, got, out) != got) {
+            fclose(in);
+            fclose(out);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        fclose(in);
+        fclose(out);
+        return -1;
+    }
+    fclose(in);
+    return (fclose(out) == 0) ? 0 : -1;
+}
+
+/* The file name a download URL resolves to, with any query stripped. */
+static void url_basename(const char *url, char *buf, size_t cap)
+{
+    const char *slash = strrchr(url, '/');
+    const char *base = (slash != NULL) ? slash + 1 : url;
+    const char *q;
+
+    if (base[0] == '\0') {
+        base = "download";
+    }
+    q = strpbrk(base, "?#");
+    if (q != NULL) {
+        size_t n = (size_t)(q - base);
+
+        if (n >= cap) {
+            n = cap - 1;
+        }
+        memcpy(buf, base, n);
+        buf[n] = '\0';
+    } else {
+        snprintf(buf, cap, "%s", base);
+    }
+}
+
+int masa_brew_fetch_archive(const char *url, const char *expect_sha,
+                            const char *out_dir, char *out_path,
+                            size_t out_path_cap)
+{
+    char base[512];
+    char path[MASA_PATH_MAX];
+    char hex[65];
+
+    if (url == NULL || url[0] == '\0') {
+        fprintf(stderr, "masa: brew fetch: formula/cask has no 'url'\n");
+        return -1;
+    }
+    if (out_dir == NULL || out_dir[0] == '\0') {
+        out_dir = ".";
+    }
+    if (masa_mkdir_p(out_dir) != 0) {
+        fprintf(stderr, "masa: brew fetch: cannot create '%s': %s\n", out_dir,
+                strerror(errno));
+        return -1;
+    }
+    url_basename(url, base, sizeof(base));
+    if (snprintf(path, sizeof(path), "%s/%s", out_dir, base) >=
+        (int)sizeof(path)) {
+        fprintf(stderr, "masa: brew fetch: output path too long\n");
+        return -1;
+    }
+
+    if (strncmp(url, "file://", 7) == 0) {
+        /* A local archive: copy it, so `masa brew fetch` works offline. */
+        const char *src = url + 7;
+
+        if (copy_file(src, path) != 0) {
+            fprintf(stderr, "masa: brew fetch: cannot copy '%s': %s\n", src,
+                    strerror(errno));
+            return -1;
+        }
+        printf("masa: brew: copied %s -> %s\n", src, path);
+    } else {
+        const char *argv[6];
+        int rc;
+
+        argv[0] = "curl";
+        argv[1] = "-fSL";
+        argv[2] = "-o";
+        argv[3] = path;
+        argv[4] = url;
+        argv[5] = NULL;
+        rc = masa_spawn_wait(argv);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "masa: brew fetch: curl failed for %s (status %d)\n", url,
+                    rc);
+            return -1;
+        }
+        printf("masa: brew: downloaded %s\n", url);
+    }
+
+    if (masa_sha256_file(path, hex) != 0) {
+        fprintf(stderr, "masa: brew fetch: cannot hash '%s': %s\n", path,
+                strerror(errno));
+        return -1;
+    }
+    printf("masa: brew: sha256 %s\n", hex);
+    printf("masa: brew: saved  %s\n", path);
+
+    if (expect_sha == NULL || expect_sha[0] == '\0') {
+        fprintf(stderr, "masa: brew fetch: no 'sha256' field to verify against\n");
+        return -1;
+    }
+    if (!str_ieq(hex, expect_sha)) {
+        fprintf(stderr,
+                "masa: brew fetch: checksum mismatch\n"
+                "masa: brew fetch:   expected %s\n"
+                "masa: brew fetch:   actual   %s\n", expect_sha, hex);
+        return 1;
+    }
+    printf("masa: brew: checksum OK\n");
+    if (out_path != NULL && out_path_cap > 0) {
+        snprintf(out_path, out_path_cap, "%s", path);
+    }
+    return 0;
+}
+
+/* The tap directory: $MASA_BREW_TAPS, else $HOME/.masa/brew/taps. */
+static int brew_taps_root(char *buf, size_t cap)
+{
+    const char *env = getenv(MASA_BREW_TAPS_ENV);
+
+    if (env != NULL && env[0] != '\0') {
+        return (snprintf(buf, cap, "%s", env) >= (int)cap) ? -1 : 0;
+    }
+    {
+        const char *home = getenv("HOME");
+
+#ifdef _WIN32
+        if (home == NULL || home[0] == '\0') {
+            home = getenv("USERPROFILE");
+        }
+#endif
+        if (home == NULL || home[0] == '\0') {
+            home = "/tmp";
+        }
+        return (snprintf(buf, cap, "%s/.masa/brew/taps", home) >= (int)cap)
+                   ? -1
+                   : 0;
+    }
+}
+
+/* Print every *.rb in dir, labelled formula or cask.  A missing dir is
+ * not an error (a tap may ship only formulas, or only casks). */
+static void list_tap_rbs(const char *dir)
+{
+    MASA_DIR *d = masa_opendir(dir);
+    struct masa_dirent *ent;
+
+    if (d == NULL) {
+        return;
+    }
+    while ((ent = masa_readdir(d)) != NULL) {
+        char full[MASA_PATH_MAX];
+        char *text = NULL;
+        size_t tlen = 0;
+        char err[256];
+        size_t n = strlen(ent->d_name);
+        const char *kind;
+
+        if (n < 3 || strcmp(ent->d_name + n - 3, ".rb") != 0) {
+            continue;
+        }
+        if (snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name) >=
+            (int)sizeof(full)) {
+            continue;
+        }
+        if (read_whole_file(full, &text, &tlen, err, sizeof(err)) != 0) {
+            continue;
+        }
+        {
+            char *tok = find_cask_token(text);
+
+            kind = (tok != NULL) ? "cask" : "formula";
+            free(tok);
+        }
+        printf("  %-7s %s\n", kind, ent->d_name);
+        free(text);
+    }
+    masa_closedir(d);
+}
+
+/* The base URL taps are cloned from: $MASA_BREW_TAP_BASE, else github. */
+static const char *tap_base(void)
+{
+    const char *env = getenv(MASA_BREW_TAP_BASE_ENV);
+
+    if (env != NULL && env[0] != '\0') {
+        return env;
+    }
+    return MASA_BREW_TAP_BASE_DEFAULT;
+}
+
+static int brew_tap(int argc, char *const argv[])
+{
+    const char *spec;
+    const char *slash;
+    size_t ulen;
+    char user[256];
+    char repo[256];
+    char root[MASA_PATH_MAX];
+    char dest[MASA_PATH_MAX];
+    char url[MASA_PATH_MAX];
+    char sub[MASA_PATH_MAX];
+
+    if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
+        fprintf(stderr, "masa: brew tap: missing <user/repo>\n");
+        return 2;
+    }
+    spec = argv[0];
+    slash = strchr(spec, '/');
+    if (slash == NULL || slash == spec || slash[1] == '\0') {
+        fprintf(stderr, "masa: brew tap: expected <user/repo>, got '%s'\n",
+                spec);
+        return 2;
+    }
+    ulen = (size_t)(slash - spec);
+    if (ulen >= sizeof(user) || strlen(slash + 1) >= sizeof(repo)) {
+        fprintf(stderr, "masa: brew tap: name too long\n");
+        return 2;
+    }
+    memcpy(user, spec, ulen);
+    user[ulen] = '\0';
+    snprintf(repo, sizeof(repo), "%s", slash + 1);
+
+    if (brew_taps_root(root, sizeof(root)) != 0 ||
+        snprintf(dest, sizeof(dest), "%s/%s/%s", root, user, repo) >=
+            (int)sizeof(dest) ||
+        snprintf(url, sizeof(url), "%s/%s/homebrew-%s", tap_base(), user,
+                 repo) >= (int)sizeof(url)) {
+        fprintf(stderr, "masa: brew tap: path too long\n");
+        return 1;
+    }
+    if (masa_mkdir_p(root) != 0) {
+        fprintf(stderr, "masa: brew tap: cannot create '%s': %s\n", root,
+                strerror(errno));
+        return 1;
+    }
+
+    if (access(dest, F_OK) == 0) {
+        const char *a[] = {"git", "-C", dest, "pull", "--ff-only", NULL};
+
+        printf("masa: brew: updating tap %s/%s\n", user, repo);
+        if (masa_spawn_wait(a) != 0) {
+            fprintf(stderr, "masa: brew tap: `git pull` failed in %s\n", dest);
+            return 1;
+        }
+    } else {
+        const char *a[] = {"git", "clone", "--depth", "1", url, dest, NULL};
+
+        printf("masa: brew: cloning %s\n", url);
+        if (masa_spawn_wait(a) != 0) {
+            fprintf(stderr, "masa: brew tap: `git clone` failed for %s\n", url);
+            return 1;
+        }
+    }
+
+    printf("masa: brew: tap %s/%s at %s\n", user, repo, dest);
+    if (snprintf(sub, sizeof(sub), "%s/Formula", dest) < (int)sizeof(sub)) {
+        list_tap_rbs(sub);
+    }
+    if (snprintf(sub, sizeof(sub), "%s/Casks", dest) < (int)sizeof(sub)) {
+        list_tap_rbs(sub);
+    }
+    list_tap_rbs(dest);
+    return 0;
+}
+
+int masa_brew_tap_main(int argc, char *const argv[])
+{
+    return brew_tap(argc, argv);
+}
+
+/* Decide whether a .rb document is a cask or a formula, fetch its URL
+ * and verify the digest. */
+static int fetch_from_rb(const char *text, size_t len, const char *label,
+                         const char *out_dir)
+{
+    char err[512];
+    struct masa_brew_cask c;
+    struct masa_brew_formula f;
+    int rc;
+
+    if (masa_brew_cask_parse(text, len, &c, err, sizeof(err)) == 0) {
+        printf("masa: brew fetch: cask %s\n", c.token);
+        rc = masa_brew_fetch_archive(c.url, c.sha256, out_dir, NULL, 0);
+        masa_brew_cask_free(&c);
+        return (rc == 0) ? 0 : 1;
+    }
+    if (masa_brew_formula_parse(text, len, &f, err, sizeof(err)) == 0) {
+        printf("masa: brew fetch: formula %s\n", f.name);
+        rc = masa_brew_fetch_archive(f.url, f.sha256, out_dir, NULL, 0);
+        masa_brew_formula_free(&f);
+        return (rc == 0) ? 0 : 1;
+    }
+    fprintf(stderr, "masa: brew fetch: %s: not a formula or cask: %s\n", label,
+            err);
+    return 1;
+}
+
+static int brew_fetch(int argc, char *const argv[])
+{
+    const char *path = NULL;
+    const char *out_dir = ".";
+    char *text = NULL;
+    size_t text_len = 0;
+    char err[512];
+    int rc;
+    int i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "masa: brew fetch: -o needs a directory\n");
+                return 2;
+            }
+            out_dir = argv[++i];
+        } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            fprintf(stderr, "masa: brew fetch: unknown option '%s'\n", argv[i]);
+            return 2;
+        } else if (path == NULL) {
+            path = argv[i];
+        } else {
+            fprintf(stderr, "masa: brew fetch: unexpected argument '%s'\n",
+                    argv[i]);
+            return 2;
+        }
+    }
+
+    if (path == NULL) {
+        fprintf(stderr, "masa: brew fetch: missing <formula_or_cask.rb>\n");
+        return 2;
+    }
+    if (read_whole_file(path, &text, &text_len, err, sizeof(err)) != 0) {
+        fprintf(stderr, "masa: brew fetch: %s\n", err);
+        return 1;
+    }
+    rc = fetch_from_rb(text, text_len, path, out_dir);
+    free(text);
+    return rc;
+}
+
+int masa_brew_fetch_main(int argc, char *const argv[])
+{
+    return brew_fetch(argc, argv);
+}
+
+/* ------------------------------------------------------------------ */
 /* Entry point                                                        */
 /* ------------------------------------------------------------------ */
+
+/* Lint a .rb that may be a formula or a cask. */
+static int lint_rb(const char *text, size_t len, const char *label)
+{
+    char err[512];
+    struct masa_brew_cask c;
+    struct masa_brew_formula f;
+    int rc;
+
+    if (masa_brew_cask_parse(text, len, &c, err, sizeof(err)) == 0) {
+        rc = masa_brew_lint_cask(&c, label);
+        masa_brew_cask_free(&c);
+        return rc;
+    }
+    if (masa_brew_formula_parse(text, len, &f, err, sizeof(err)) == 0) {
+        rc = masa_brew_lint_formula(&f, label);
+        masa_brew_formula_free(&f);
+        return rc;
+    }
+    fprintf(stderr, "masa: brew lint: %s: not a formula or cask: %s\n", label,
+            err);
+    return 1;
+}
 
 static int brew_lint(int argc, char *const argv[])
 {
@@ -1152,11 +1775,10 @@ static int brew_lint(int argc, char *const argv[])
     char *text = NULL;
     size_t text_len = 0;
     char err[512];
-    struct masa_brew_formula f;
     int rc;
 
     if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
-        fprintf(stderr, "masa: brew lint: missing <formula.rb>\n");
+        fprintf(stderr, "masa: brew lint: missing <formula.rb|cask.rb>\n");
         return 2;
     }
     path = argv[0];
@@ -1165,22 +1787,17 @@ static int brew_lint(int argc, char *const argv[])
         fprintf(stderr, "masa: brew lint: %s\n", err);
         return 1;
     }
-    if (masa_brew_formula_parse(text, text_len, &f, err, sizeof(err)) != 0) {
-        fprintf(stderr, "masa: brew lint: %s: %s\n", path, err);
-        free(text);
-        return 1;
-    }
+    rc = lint_rb(text, text_len, path);
     free(text);
-
-    rc = masa_brew_lint_formula(&f, path);
-    masa_brew_formula_free(&f);
     return rc;
 }
 
 int masa_brew_main(int argc, char *const argv[])
 {
     if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
-        fprintf(stderr, "masa: brew: missing subcommand (lint | build)\n");
+        fprintf(stderr,
+                "masa: brew: missing subcommand "
+                "(lint | build | tap | fetch)\n");
         return 2;
     }
     if (strcmp(argv[0], "lint") == 0) {
@@ -1189,7 +1806,14 @@ int masa_brew_main(int argc, char *const argv[])
     if (strcmp(argv[0], "build") == 0) {
         return brew_build(argc - 1, &argv[1]);
     }
+    if (strcmp(argv[0], "tap") == 0) {
+        return brew_tap(argc - 1, &argv[1]);
+    }
+    if (strcmp(argv[0], "fetch") == 0) {
+        return brew_fetch(argc - 1, &argv[1]);
+    }
 
     fprintf(stderr, "masa: brew: unknown subcommand '%s'\n", argv[0]);
     return 2;
 }
+

@@ -4,7 +4,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.6.1](https://img.shields.io/badge/version-v1.6.1-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.7.0](https://img.shields.io/badge/version-v1.7.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -31,7 +31,8 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
   virtual machine, no kernel module and no full Darwin userland. Build and
   run in one place.
 - **It speaks your build systems.** `masa xcode build` reads a checked-in
-  `.xcodeproj`, `masa brew` lints and builds Homebrew formulas, and
+  `.xcodeproj`, `masa brew` lints formulas *and casks*, builds formulas,
+  taps Homebrew repos and verifies downloads, and
   `masa exec` / `masa shell` run `make` and shell scripts with `cc`, `ld`,
   `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's
   shims.
@@ -44,7 +45,7 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## What's in the box
 
-Every capability below ships in **v1.6.1**, inside one dependency-free C11
+Every capability below ships in **v1.7.0**, inside one dependency-free C11
 binary.
 
 | Capability | Command | What it does |
@@ -53,7 +54,9 @@ binary.
 | Run Mach-O | `masa run` / `masa danroot` | Execute a Mach-O `MH_EXECUTE` and its `MH_DYLIB` dependencies in-process — Danroot Layers 1–4 (dynamic libraries, virtual root, CoreFoundation + Objective-C runtimes, the cross-architecture bridge) |
 | Darwin GUI | `build/masa-gui run` | AppKit + CoreGraphics over SDL2 — open a real window for a self-contained Darwin app — Danroot Layer 5 |
 | Xcode projects | `masa xcode build` | Build a checked-in `.xcodeproj` and bundle the `.app`, without Xcode |
-| Homebrew | `masa brew lint` / `masa brew build` | Lint a formula and build it into a Cellar |
+| Homebrew | `masa brew lint` / `masa brew build` | Lint a formula **or a cask** and build a formula into a Cellar |
+| Homebrew online | `masa brew tap` / `masa brew fetch` | Clone a tap and download + **verify** a formula/cask URL against its `sha256` |
+| Partial frameworks | `masa sdk init-stub` | Clean-room Metal, QuartzCore, Security and IOKit stubs for Flutter/Dart-style binaries |
 | Package | `masa pack --dmg` / `--ipa` | Write a UDIF `.dmg` or a `Payload/<App>.app` `.ipa` from scratch |
 | Stub SDK | `masa sdk init-stub` | Write the clean-room SDK the linker needs (no Apple SDK) |
 | Build systems | `masa exec`, `masa shell`, `masa init-shims` | Run `make` and scripts with `cc`, `ld`, `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's shims |
@@ -78,7 +81,8 @@ binary.
 *Scope note: Masa targets self-contained C/C++ (and Swift) executables linked
 against the stub SDK's `libSystem`. It is not a full macOS userland — a program
 that needs Apple's private frameworks or a GUI toolkit will not run under
-Danroot.*
+Danroot, though the stub SDK ships partial Metal, QuartzCore, Security and
+IOKit stubs so a Flutter/Dart-style binary's imports resolve and it starts.*
 
 ## Quick Start
 
@@ -125,28 +129,41 @@ masa pack --dmg DemoApp.app -o DemoApp.dmg    # UDIF disk image
 masa pack --ipa DemoApp.app -o DemoApp.ipa    # Payload/DemoApp.app ZIP
 ```
 
-**Lint and build a Homebrew formula:**
+**Lint and build a Homebrew formula (or lint a cask):**
 
 ```sh
 masa brew lint mytool.rb
 masa brew build mytool.rb --source ./mytool-src --prefix /tmp/homebrew
+masa brew lint myapp.rb                   # cask lint (auto-detected)
+masa brew tap M5Devs/masa                 # clone a tap
+masa brew fetch myapp.rb -o ./downloads   # download + verify sha256
 ```
 
 ## Status
 
-Milestone 16 (v1.6.0): the Masa Danroot loader gains **Layer 5** - a
+Milestone 17 (v1.7.0): **online Homebrew, cask support and partial
+Flutter/Dart framework stubs.** `masa brew` now understands **Homebrew
+Casks** (`cask "name" do ... end`) alongside formulas: `masa brew lint`
+auto-detects which one a `.rb` is and checks a cask's required fields
+(`version`, `sha256`, `url` and an `app`/`pkg`/`binary` artifact). Two new
+subcommands make Masa's Homebrew support *online*: `masa brew tap
+<user/repo>` clones (or fast-forwards) `homebrew-<repo>` into a local tap
+tree and lists its formulas and casks, and `masa brew fetch
+<formula_or_cask.rb>` downloads the declared `url` and verifies it against
+the declared `sha256` — backed by a **clean-room SHA-256** (`src/sha256.c`,
+FIPS 180-4, no OpenSSL dependency). A `file://` URL is copied from the local
+filesystem, so fetch is fully testable offline. The stub SDK gains **partial
+macOS framework stubs** for the frameworks a Flutter/Dart-style desktop
+binary imports at load time — **Metal, QuartzCore, Security and IOKit** plus
+`libz`/`libc++` — with Danroot shims for the ones that matter:
+`CACurrentMediaTime` maps to the host monotonic clock, `SecRandomCopyBytes`
+fills from `/dev/urandom`, and `MTLCreateSystemDefaultDevice` returns `NULL`
+cleanly (Metal is not emulated; a missing GPU is handled by every caller)
+instead of crashing. This sits on the Milestone 16 Danroot Layer 5
+(v1.6.0) - a
 clean-room **AppKit and CoreGraphics** built over **SDL2**, so a self-contained
-Darwin GUI program runs natively and opens a real window. A program that calls
-`NSApplication`/`NSWindow` through the Objective-C runtime and draws with
-`CGContextFillRect` gets an SDL2 window with those rectangles painted on
-screen; the run loop draws each frame, and every fill the program made before
-entering the loop is replayed on top (the way an AppKit view redraws itself),
-so a Darwin app that draws once and then calls `[NSApp run]` still shows its
-content. The backend is compiled in only for the GUI build (`make gui`
-produces `build/masa-gui` with `-DMASA_DANROOT_SDL2`), so the core tool and
-its tests stay 100% SDL2-free; the plain `masa run` reports a clear
-`unresolved GUI symbol '...' - rebuild with 'make gui'` for the first AppKit
-symbol it cannot satisfy. This sits on the Milestone 15 Danroot Layer 4
+Darwin GUI program runs natively and opens a real window - the Milestone 15
+Danroot Layer 4
 (v1.5.0) - the cross-architecture bridge that runs an `arm64-apple-darwin`
 Mach-O image on an x86_64 host through `qemu-aarch64` and a Linux ARM64 build
 of Masa, with stack-varargs trampolines that make a bridged program's
@@ -258,9 +275,13 @@ masa sdk info                 Report whether the configured SDK is usable
 masa sdk init-stub <dir>      Write a clean-room stub SDK to <dir>
 masa xcode build <App.xcodeproj> [-o <dir>] [--bundle]
                               Build an Xcode project without Xcode
-masa brew lint <formula.rb>   Lint a Homebrew formula
+masa brew lint <formula.rb|cask.rb>
+                              Lint a Homebrew formula or cask
 masa brew build <formula.rb> --source <dir> [--prefix <dir>]
                               Build a Homebrew formula into a Cellar
+masa brew tap <user/repo>     Clone/update a Homebrew tap
+masa brew fetch <formula.rb> [-o <dir>]
+                              Download and verify a formula/cask URL
 masa pack --ipa <App.app> -o <out.ipa>
 masa pack --dmg <App.app> -o <out.dmg>
                               Package a .app as an .ipa or a .dmg
@@ -504,9 +525,24 @@ Danroot shims. `libSystem.tbd` exports `___stack_chk_fail` and
 `___stack_chk_guard`, so an `arm64` program that uses a stack buffer links
 without extra flags.
 
+For a **Flutter/Dart-style** desktop binary, the stub SDK also ships the
+system frameworks such a binary imports at load time: partial clean-room
+stubs for **Metal**, **QuartzCore**, **Security** and **IOKit**, plus
+`libz` and `libc++`. Each advertises only the symbols the Danroot loader can
+satisfy, so a binary that links against them resolves every import and runs.
+The interesting ones are real: `CACurrentMediaTime` maps to the host monotonic
+clock and `SecRandomCopyBytes` fills its buffer from `/dev/urandom`. Metal is
+not emulated — `MTLCreateSystemDefaultDevice` returns `NULL` cleanly (a
+missing GPU is something every caller already handles) rather than crashing.
+
 ```sh
 masa sdk init-stub /opt/masa/sdk
 masa sdk info                     # status: ready (with MASA_SDK_PATH set)
+
+# A Flutter/Dart-style binary links against the partial stubs and runs.
+MASA_SDK_PATH=/opt/masa/sdk MASA_TARGET=x86_64-apple-darwin \
+  masa cc app.c -framework QuartzCore -framework Security -framework Metal -o app
+masa danroot ./app
 ```
 
 ### `masa xcode`
@@ -604,6 +640,61 @@ regular file the steps place in `Cellar/<name>/<version>/bin/` is checked for
 the 64-bit Mach-O magic (`CF FA ED FE`) and the `MH_EXECUTE` file type, then
 linked into `<prefix>/bin/`. The prefix defaults to `$MASA_BREW_PREFIX`, or
 `/tmp/masa-homebrew` when that is unset.
+
+`masa brew` also understands **Homebrew Casks** — the `cask "name" do ... end`
+form that installs a prebuilt `.app` from a `.dmg`/`.zip`/`.pkg` download
+rather than building from source. `masa brew lint` auto-detects which one a
+`.rb` is:
+
+```sh
+masa brew lint openrom.rb
+# openrom.rb: ok (cask)
+#   token:    openrom
+#   version:  1.4.2
+#   sha256:   0123456789abcdef...
+#   url:      https://example.com/OpenROM-1.4.2.dmg
+#   name:     OpenROM
+#   homepage: https://example.com/openrom
+#   desc:     Open source ROM manager
+#   artifact: OpenROM.app
+```
+
+A cask fails the lint when a required field is missing — `version`, `sha256`,
+`url` or an artifact (`app`/`pkg`/`binary "..."`) — and warns (without
+failing) when `homepage` or `desc` is absent.
+
+Two subcommands make the Homebrew support *online*:
+
+```sh
+# Clone (or fast-forward) https://github.com/<user>/homebrew-<repo> into a
+# local tap tree and list the formulas and casks it ships.
+masa brew tap M5Devs/masa
+
+# Download a formula's or cask's `url` and verify it against its `sha256`.
+masa brew fetch openrom.rb -o /tmp/downloads
+# masa: brew fetch: cask openrom
+# masa: brew: downloaded https://example.com/OpenROM-1.4.2.dmg
+# masa: brew: sha256 0123456789abcdef...
+# masa: brew: saved  /tmp/downloads/OpenROM-1.4.2.dmg
+# masa: brew: checksum OK
+
+# A file:// URL is copied from the local filesystem (fully offline):
+masa brew fetch local.rb -o /tmp/downloads
+# masa: brew fetch: cask local
+# masa: brew: copied /tmp/local.dmg -> /tmp/downloads/local.dmg
+# masa: brew: sha256 5891b5b522d5df08...
+# masa: brew: saved  /tmp/downloads/local.dmg
+# masa: brew: checksum OK
+```
+
+`masa brew fetch` hashes the download with a **clean-room SHA-256**
+(`src/sha256.c`, FIPS 180-4, no OpenSSL dependency) and compares it with the
+formula's or cask's `sha256` field, failing on a mismatch. A `file://` URL is
+copied from the local filesystem, so `fetch` works and is testable offline;
+`http(s)` URLs are downloaded with `curl -fSL`. Taps are cloned into
+`$MASA_BREW_TAPS` (default `~/.masa/brew/taps`), and `$MASA_BREW_TAP_BASE`
+overrides the `https://github.com` base (useful for a mirror or an offline
+test).
 
 ### `masa pack`
 
@@ -960,6 +1051,8 @@ on the build host.
 | `MASA_SHIM_DIR` | Directory holding the `argv[0]` shims                  |
 | `MASA_SHIM_TARGET` | Symlink target for `init-shims` (default: this binary) |
 | `MASA_BREW_PREFIX` | Prefix for `masa brew build` (default `/tmp/masa-homebrew`) |
+| `MASA_BREW_TAPS` | Directory `masa brew tap` clones taps into |
+| `MASA_BREW_TAP_BASE` | Base URL for `masa brew tap` (default `https://github.com`) |
 | `MASA_KEEP_PS1` | `1` leaves your existing `PS1` alone in `masa shell`   |
 | `MASA_LIBRARY_PATH` | Extra colon-separated dirs `masa run` searches for dylibs |
 | `MASA_DANROOT_ROOT` | Virtual root for `masa run` path virtualization        |
@@ -983,7 +1076,8 @@ src/sys_shims.c        uname / sw_vers / xcode-select / xcrun shims
 src/tool_shims.c       ld / ar / ranlib / strip / nm / otool shims and codesign
 src/sdk.c              sdk info and the clean-room stub SDK writer
 src/xcodeproj.c        pbxproj parser and the Xcode project builder
-src/brew.c             Homebrew formula linter and builder
+src/brew.c             Homebrew formula/cask linter, builder, tap and fetch
+src/sha256.c           clean-room SHA-256 for `masa brew fetch` verification
 src/pack.c             .app packager (.ipa ZIP and .dmg UDIF)
 src/danroot.c          Masa Danroot: the Mach-O loader (executables and
                        dylibs) behind `masa run`
@@ -1098,7 +1192,17 @@ cross toolchain is absent, or on a non-x86_64 host). The Milestone 16 tests
 link a program that imports `CGContextFillRect` against `-framework
 CoreGraphics` and assert the plain `masa run` reports the GUI hint
 (`unresolved GUI symbol ... rebuild with 'make gui'`) rather than a bare
-unresolved symbol.
+unresolved symbol. The Milestone 17 tests check the clean-room SHA-256 against
+the NIST `""`/`"abc"` vectors and a 120-byte message that exercises the
+padding edge case; parse and lint a cask (including a `pkg` artifact and a
+malformed declaration that must be rejected); `masa brew fetch` a `file://`
+URL and confirm the digest check passes (and fails on a mismatch); `masa brew
+tap` a local tap repository through `MASA_BREW_TAP_BASE` and confirm the cask
+it ships is listed; and build a Flutter/Dart-style program against
+`-framework QuartzCore -framework Security -framework Metal` and run it
+through `masa danroot`, asserting `CACurrentMediaTime` is positive,
+`SecRandomCopyBytes` fills its buffer, `MTLCreateSystemDefaultDevice` returns
+`NULL` and nothing leaks.
 
 `make test-gui` covers `masa-term` (`tests/test_gui.c`), compiled with the
 same `-Wall -Wextra -Werror -fsanitize=address` flags. It runs `masa shell -c

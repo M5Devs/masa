@@ -353,6 +353,8 @@ static void reset_masa_env(void)
     set_env(MASA_QEMU_AARCH64_ENV, NULL);
     set_env(MASA_DANROOT_AARCH64_ENV, NULL);
     set_env(MASA_DANROOT_NO_BRIDGE_ENV, NULL);
+    set_env(MASA_BREW_TAPS_ENV, NULL);
+    set_env(MASA_BREW_TAP_BASE_ENV, NULL);
     set_env("PATH", g_original_path);
 }
 
@@ -3291,6 +3293,450 @@ static void test_brew_formula_shell_string_flag(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Milestone 17: casks, online tap/fetch and SHA-256                  */
+/* ------------------------------------------------------------------ */
+
+/* A realistic Homebrew cask, the shape `brew create --cask` emits. */
+static const char *demo_cask(void)
+{
+    return
+        "cask \"openrom\" do\n"
+        "  version \"1.4.2\"\n"
+        "  sha256 \"0123456789abcdef0123456789abcdef0123456789abcdef"
+        "0123456789abcdef\"\n"
+        "  url \"https://example.com/OpenROM-1.4.2.dmg\",\n"
+        "      verified: \"example.com\"\n"
+        "  name \"OpenROM\"\n"
+        "  desc \"A retro ROM manager\"\n"
+        "  homepage \"https://example.com/openrom\"\n"
+        "\n"
+        "  app \"OpenROM.app\"\n"
+        "end\n";
+}
+
+static void test_brew_cask_parse(void)
+{
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    rc = masa_brew_cask_parse(demo_cask(), strlen(demo_cask()), &c, err,
+                              sizeof(err));
+    CHECK(rc == 0);
+    if (rc != 0) {
+        fprintf(stderr, "  parse error: %s\n", err);
+        return;
+    }
+    CHECK_STREQ(c.token, "openrom");
+    CHECK_STREQ(c.version, "1.4.2");
+    CHECK_STREQ(c.name, "OpenROM");
+    CHECK_STREQ(c.app, "OpenROM.app");
+    CHECK(c.has_app == 1);
+    CHECK(c.url != NULL && strstr(c.url, "OpenROM-1.4.2.dmg") != NULL);
+    masa_brew_cask_free(&c);
+}
+
+/* A cask with a `pkg` artifact and no explicit `name` still parses. */
+static void test_brew_cask_pkg_artifact(void)
+{
+    static const char *text =
+        "cask \"toolbox\" do\n"
+        "  version \"2.0\"\n"
+        "  sha256 \"deadbeef\"\n"
+        "  url \"https://e.com/toolbox-2.0.pkg\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  pkg \"Toolbox.pkg\"\n"
+        "end\n";
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    rc = masa_brew_cask_parse(text, strlen(text), &c, err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK(c.has_app == 1);
+    CHECK_STREQ(c.app, "Toolbox.pkg");
+    CHECK(c.name == NULL);
+    masa_brew_cask_free(&c);
+}
+
+static void test_brew_cask_rejects_malformed(void)
+{
+    static const char *not_a_cask = "foo \"bar\" do\n  version \"1\"\nend\n";
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    rc = masa_brew_cask_parse(not_a_cask, strlen(not_a_cask), &c, err,
+                              sizeof(err));
+    CHECK(rc != 0);
+    CHECK(c.token == NULL);
+
+    /* Empty input is rejected too. */
+    rc = masa_brew_cask_parse("", 0, &c, err, sizeof(err));
+    CHECK(rc != 0);
+}
+
+static void test_brew_lint_cask_valid(void)
+{
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    if (masa_brew_cask_parse(demo_cask(), strlen(demo_cask()), &c, err,
+                             sizeof(err)) != 0) {
+        CHECK(0);
+        return;
+    }
+    rc = masa_brew_lint_cask(&c, "openrom.rb");
+    CHECK(rc == 0);
+    masa_brew_cask_free(&c);
+}
+
+/* A cask missing its `sha256` is a required-field failure. */
+static void test_brew_lint_cask_missing_sha(void)
+{
+    static const char *text =
+        "cask \"nohash\" do\n"
+        "  version \"1.0\"\n"
+        "  url \"https://e.com/x.dmg\"\n"
+        "  homepage \"https://e.com\"\n"
+        "  app \"X.app\"\n"
+        "end\n";
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    CHECK(masa_brew_cask_parse(text, strlen(text), &c, err, sizeof(err)) == 0);
+    rc = masa_brew_lint_cask(&c, "nohash.rb");
+    CHECK(rc != 0);
+    CHECK(c.sha256 == NULL);
+    masa_brew_cask_free(&c);
+}
+
+/* A cask with no artifact (no app/pkg/binary) is a required-field failure. */
+static void test_brew_lint_cask_missing_artifact(void)
+{
+    static const char *text =
+        "cask \"noapp\" do\n"
+        "  version \"1.0\"\n"
+        "  sha256 \"abc\"\n"
+        "  url \"https://e.com/x.dmg\"\n"
+        "  homepage \"https://e.com\"\n"
+        "end\n";
+    struct masa_brew_cask c;
+    char err[256];
+    int rc;
+
+    memset(&c, 0, sizeof(c));
+    CHECK(masa_brew_cask_parse(text, strlen(text), &c, err, sizeof(err)) == 0);
+    rc = masa_brew_lint_cask(&c, "noapp.rb");
+    CHECK(rc != 0);
+    CHECK(c.has_app == 0);
+    masa_brew_cask_free(&c);
+}
+
+/* `masa brew lint` auto-detects a cask and reports it through the router. */
+static void test_brew_lint_cask_subcommand(void)
+{
+    char dir[] = "/tmp/masa_cask_lint_XXXXXX";
+    char path[512];
+    char out[4096];
+    char err[4096];
+    char *argv[5];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/openrom.rb", dir);
+    if (write_file(path, demo_cask()) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "lint";
+    argv[3] = path;
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "ok (cask)");
+    CHECK_CONTAINS(out, "token:    openrom");
+    CHECK_CONTAINS(out, "artifact: OpenROM.app");
+
+    remove_tree(dir);
+}
+
+/*
+ * SHA-256 against the published FIPS 180-4 / NIST test vectors.  These
+ * are the canonical "abc", empty-string and multi-block values; a wrong
+ * digest here means the whole verification path in `brew fetch` is wrong.
+ */
+static void test_sha256_nist_vectors(void)
+{
+    char hex[65];
+    struct masa_sha256_ctx ctx;
+
+    masa_sha256_buffer("", 0, hex);
+    CHECK_STREQ(hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+    masa_sha256_buffer("abc", 3, hex);
+    CHECK_STREQ(hex,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    masa_sha256_buffer("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                       56, hex);
+    CHECK_STREQ(hex,
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    /* One million 'a' characters, streamed in small chunks. */
+    {
+        char chunk[1000];
+        int i;
+
+        memset(chunk, 'a', sizeof(chunk));
+        masa_sha256_init(&ctx);
+        for (i = 0; i < 1000; i++) {
+            masa_sha256_update(&ctx, chunk, sizeof(chunk));
+        }
+        {
+            unsigned char digest[32];
+            static const char digits[] = "0123456789abcdef";
+            int j;
+
+            masa_sha256_final(&ctx, digest);
+            for (j = 0; j < 32; j++) {
+                hex[j * 2] = digits[digest[j] >> 4];
+                hex[j * 2 + 1] = digits[digest[j] & 0x0f];
+            }
+            hex[64] = '\0';
+        }
+    }
+    CHECK_STREQ(hex,
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
+/* A 120-byte input exercises the padding path that spills a block. */
+static void test_sha256_block_boundary(void)
+{
+    char hex[65];
+    static const char input[] =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    int rc = masa_sha256_buffer(input, 120, hex);
+
+    CHECK(rc == 0);
+    /* Verified independently with coreutils sha256sum. */
+    CHECK_STREQ(hex,
+        "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c");
+}
+
+/* `masa brew fetch` against a local file:// URL: match and mismatch. */
+static void test_brew_fetch_file_url(void)
+{
+    char dir[] = "/tmp/masa_fetch_XXXXXX";
+    char src[512];
+    char cask[512];
+    char out_dir[512];
+    char out[8192];
+    char err[8192];
+    char url[768];
+    char *argv[7];
+    char hex[65];
+    int rc;
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(src, sizeof(src), "%s/payload.bin", dir);
+    if (write_file(src, "masa release payload\n") != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    if (masa_sha256_file(src, hex) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    snprintf(url, sizeof(url), "file://%s", src);
+    snprintf(out_dir, sizeof(out_dir), "%s/out", dir);
+
+    /* A cask whose sha256 matches the payload verifies. */
+    snprintf(cask, sizeof(cask), "%s/ok.rb", dir);
+    {
+        char text[1024];
+
+        snprintf(text, sizeof(text),
+                 "cask \"payload\" do\n"
+                 "  version \"1.0\"\n"
+                 "  sha256 \"%s\"\n"
+                 "  url \"%s\"\n"
+                 "  app \"Payload.app\"\n"
+                 "end\n", hex, url);
+        if (write_file(cask, text) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            return;
+        }
+    }
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "fetch";
+    argv[3] = cask;
+    argv[4] = "-o";
+    argv[5] = out_dir;
+    argv[6] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  fetch stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "checksum OK");
+
+    /* A cask whose sha256 does not match is rejected. */
+    snprintf(cask, sizeof(cask), "%s/bad.rb", dir);
+    {
+        char text[1024];
+
+        snprintf(text, sizeof(text),
+                 "cask \"payload\" do\n"
+                 "  version \"1.0\"\n"
+                 "  sha256 \"%s\"\n"
+                 "  url \"%s\"\n"
+                 "  app \"Payload.app\"\n"
+                 "end\n",
+                 "00000000000000000000000000000000000000000000000000000000"
+                 "00000000", url);
+        if (write_file(cask, text) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            return;
+        }
+    }
+    argv[3] = cask;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "checksum mismatch");
+
+    remove_tree(dir);
+}
+
+/* `masa brew tap` clones a tap from a local base and lists its .rb files. */
+static void test_brew_tap_local(void)
+{
+    char dir[] = "/tmp/masa_tap_XXXXXX";
+    char base[512];
+    char taps[512];
+    char srcdir[2048];
+    char reporoot[1024];
+    char caskpath[4096];
+    char out[8192];
+    char err[8192];
+    char *argv[5];
+    int rc;
+
+    if (!tool_available("git")) {
+        printf("  SKIP needs git\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(base, sizeof(base), "%s", dir);
+    snprintf(taps, sizeof(taps), "%s/taps", dir);
+    snprintf(reporoot, sizeof(reporoot), "%s/M5Devs/homebrew-openrom", dir);
+    snprintf(srcdir, sizeof(srcdir), "%s/Casks", reporoot);
+    if (masa_mkdir_p(srcdir) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    snprintf(caskpath, sizeof(caskpath), "%s/openrom.rb", srcdir);
+    if (write_file(caskpath, demo_cask()) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    /* Commit the tap repo so git has something to clone. */
+    {
+        const char *g1[] = {"git", "-C", reporoot, "init", "-q", NULL};
+        const char *g2[] = {"git", "-C", reporoot, "add", "-A", NULL};
+        const char *g3[] = {"git", "-C", reporoot, "commit", "-qm", "tap",
+                            NULL};
+
+        set_env("GIT_AUTHOR_NAME", "t");
+        set_env("GIT_AUTHOR_EMAIL", "t@e.com");
+        set_env("GIT_COMMITTER_NAME", "t");
+        set_env("GIT_COMMITTER_EMAIL", "t@e.com");
+        if (masa_spawn_wait(g1) != 0 || masa_spawn_wait(g2) != 0 ||
+            masa_spawn_wait(g3) != 0) {
+            fprintf(stderr, "  git setup failed\n");
+            g_failed++;
+            remove_tree(dir);
+            return;
+        }
+    }
+
+    set_env(MASA_BREW_TAPS_ENV, taps);
+    set_env(MASA_BREW_TAP_BASE_ENV, base);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "tap";
+    argv[3] = "M5Devs/openrom";
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  tap stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "cask    openrom.rb");
+    {
+        char cloned[768];
+
+        snprintf(cloned, sizeof(cloned),
+                 "%s/M5Devs/openrom/Casks/openrom.rb", taps);
+        CHECK(file_exists(cloned));
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/* A bad <user/repo> argument is a usage error, not a crash. */
+static void test_brew_tap_bad_arg(void)
+{
+    char out[1024];
+    char err[1024];
+    char *argv[5];
+    int rc;
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "tap";
+    argv[3] = "noslash";
+    argv[4] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "expected <user/repo>");
+}
+
+/* ------------------------------------------------------------------ */
 /* Milestone 10: `masa pack` (.ipa and .dmg)                          */
 /* ------------------------------------------------------------------ */
 
@@ -5352,8 +5798,8 @@ static void test_android_ndk_compile(void)
     static const char *sources[] = {
         "src/main.c", "src/cc_wrapper.c", "src/swift_wrapper.c",
         "src/sys_shims.c", "src/tool_shims.c", "src/sdk.c",
-        "src/xcodeproj.c", "src/brew.c", "src/pack.c", "src/exec.c",
-        "src/doctor.c", "src/danroot.c", "src/danroot_cf.c",
+        "src/xcodeproj.c", "src/brew.c", "src/sha256.c", "src/pack.c",
+        "src/exec.c", "src/doctor.c", "src/danroot.c", "src/danroot_cf.c",
         "src/danroot_objc.c", "src/danroot_appkit.c",
         "src/platform_posix.c"
     };
@@ -6154,6 +6600,111 @@ static void test_danroot_objc(void)
 }
 
 /*
+ * A Flutter/Dart-style binary imports QuartzCore, Security and Metal at
+ * load time.  CACurrentMediaTime must return a real monotonic value and
+ * SecRandomCopyBytes must fill its buffer from the host CSPRNG, while
+ * MTLCreateSystemDefaultDevice returns NULL cleanly (a device is
+ * optional).  Nothing may leak.
+ */
+static void test_danroot_flutter_frameworks(void)
+{
+    const char *target = host_apple_target();
+    char dir[] = "/tmp/masa_flutter_XXXXXX";
+    char sdk[4096];
+    char src[4096];
+    char exe[4096];
+    char out[4096];
+    char err[4096];
+    char *argv[14];
+    int n = 0;
+    int rc;
+    static const char *source =
+        "#include <QuartzCore/QuartzCore.h>\n"
+        "#include <Security/Security.h>\n"
+        "#include <Metal/Metal.h>\n"
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    double t1 = CACurrentMediaTime();\n"
+        "    unsigned char buf[16];\n"
+        "    int i, nz = 0;\n"
+        "    int sec = SecRandomCopyBytes(0, sizeof(buf), buf);\n"
+        "    for (i = 0; i < 16; i++) if (buf[i]) nz = 1;\n"
+        "    printf(\"media=%d\\n\", t1 > 0.0);\n"
+        "    printf(\"sec=%d nz=%d\\n\", sec, nz);\n"
+        "    printf(\"dev=%d\\n\", MTLCreateSystemDefaultDevice() == 0);\n"
+        "    return 0;\n"
+        "}\n";
+
+    if (target == NULL || !tool_available("clang")) {
+        printf("  SKIP needs clang and a supported host\n");
+        g_skipped++;
+        return;
+    }
+    if (mkdtemp(dir) == NULL) {
+        fprintf(stderr, "  FAIL cannot create a temporary directory\n");
+        g_failed++;
+        return;
+    }
+
+    snprintf(sdk, sizeof(sdk), "%s/sdk", dir);
+    snprintf(src, sizeof(src), "%s/flutter.c", dir);
+    snprintf(exe, sizeof(exe), "%s/flutter", dir);
+    reset_masa_env();
+    if (make_stub_sdk(sdk) != 0 || !sdk_is_stubbed(sdk) ||
+        write_file(src, source) != 0) {
+        fprintf(stderr, "  FAIL could not set up the SDK or source\n");
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+    set_env(MASA_SDK_PATH_ENV, sdk);
+    set_env(MASA_TARGET_ENV, target);
+
+    argv[n++] = "masa";
+    argv[n++] = "cc";
+    argv[n++] = src;
+    argv[n++] = "-o";
+    argv[n++] = exe;
+    argv[n++] = "-framework";
+    argv[n++] = "QuartzCore";
+    argv[n++] = "-framework";
+    argv[n++] = "Security";
+    argv[n++] = "-framework";
+    argv[n++] = "Metal";
+    argv[n] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  cc stderr: %s\n", err);
+        g_failed++;
+        remove_tree(dir);
+        reset_masa_env();
+        return;
+    }
+
+    argv[0] = "masa";
+    argv[1] = "danroot";
+    argv[2] = exe;
+    argv[3] = NULL;
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  danroot stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "media=1");
+    CHECK_CONTAINS(out, "sec=0 nz=1");
+    CHECK_CONTAINS(out, "dev=1");
+    /* Metal is reported as unemulated, not silently faked. */
+    CHECK_CONTAINS(err, "Metal is not emulated");
+    /* Nothing may be left allocated after the run. */
+    CHECK(strstr(err, "LeakSanitizer") == NULL);
+    CHECK(strstr(err, "leaked") == NULL);
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
+/*
  * A Darwin GUI program imports CoreGraphics/AppKit symbols that the core
  * `masa` build (no SDL2) cannot satisfy.  The loader must say so plainly,
  * pointing at `make gui`, rather than reporting a bare unresolved symbol.
@@ -6488,6 +7039,18 @@ int main(void)
     RUN(test_brew_build_errors);
     RUN(test_brew_build_shell_string_steps);
     RUN(test_brew_formula_shell_string_flag);
+    RUN(test_brew_cask_parse);
+    RUN(test_brew_cask_pkg_artifact);
+    RUN(test_brew_cask_rejects_malformed);
+    RUN(test_brew_lint_cask_valid);
+    RUN(test_brew_lint_cask_missing_sha);
+    RUN(test_brew_lint_cask_missing_artifact);
+    RUN(test_brew_lint_cask_subcommand);
+    RUN(test_sha256_nist_vectors);
+    RUN(test_sha256_block_boundary);
+    RUN(test_brew_fetch_file_url);
+    RUN(test_brew_tap_bad_arg);
+    RUN(test_brew_tap_local);
     RUN(test_pack_ipa);
     RUN(test_pack_dmg);
     RUN(test_pack_errors);
@@ -6512,6 +7075,7 @@ int main(void)
     RUN(test_danroot_arm64_stack_protector);
     RUN(test_danroot_corefoundation);
     RUN(test_danroot_objc);
+    RUN(test_danroot_flutter_frameworks);
     RUN(test_danroot_gui_symbol_hint);
     RUN(test_danroot_arm64_bridge_on_x86_64);
     RUN(test_danroot_arm64_bridge_fallbacks);
