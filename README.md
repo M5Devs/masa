@@ -1,8 +1,10 @@
 # Masa
 
+<p align="center"><img src="assets/logo.png" alt="Masa Logo" width="140" /></p>
+
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.6.0](https://img.shields.io/badge/version-v1.6.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.6.1](https://img.shields.io/badge/version-v1.6.1-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -39,6 +41,25 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 - **It's small and portable.** Pure C11 built with `-std=c11 -Wall -Wextra
   -Werror` and no runtime dependencies for the core. Builds on Linux, Windows
   (MinGW-w64) and Android (NDK).
+
+## What's in the box
+
+Every capability below ships in **v1.6.1**, inside one dependency-free C11
+binary.
+
+| Capability | Command | What it does |
+| --- | --- | --- |
+| Cross-compile | `masa cc`, `masa swiftc` | Build real Mach-O executables and dylibs with `clang` + `ld64.lld` |
+| Run Mach-O | `masa run` / `masa danroot` | Execute a Mach-O `MH_EXECUTE` and its `MH_DYLIB` dependencies in-process — Danroot Layers 1–4 (dynamic libraries, virtual root, CoreFoundation + Objective-C runtimes, the cross-architecture bridge) |
+| Darwin GUI | `build/masa-gui run` | AppKit + CoreGraphics over SDL2 — open a real window for a self-contained Darwin app — Danroot Layer 5 |
+| Xcode projects | `masa xcode build` | Build a checked-in `.xcodeproj` and bundle the `.app`, without Xcode |
+| Homebrew | `masa brew lint` / `masa brew build` | Lint a formula and build it into a Cellar |
+| Package | `masa pack --dmg` / `--ipa` | Write a UDIF `.dmg` or a `Payload/<App>.app` `.ipa` from scratch |
+| Stub SDK | `masa sdk init-stub` | Write the clean-room SDK the linker needs (no Apple SDK) |
+| Build systems | `masa exec`, `masa shell`, `masa init-shims` | Run `make` and scripts with `cc`, `ld`, `ar`, `ranlib`, `strip`, `nm`, `otool` and `codesign` resolved to Masa's shims |
+| GUI terminal | `masa-term` | Standalone SDL2 + libvterm terminal running `masa shell` on a real PTY |
+| Readiness check | `masa doctor` | Report whether this host can cross-build Mach-O |
+| Local packaging | `make dist` | Package Linux, Windows and Android archives with `SHA256SUMS` |
 
 ## How it compares
 
@@ -887,6 +908,8 @@ pseudo-terminal, runs `masa shell` on it, feeds the output through `libvterm`
 and draws a dark, macOS-style window: a header bar with the red/yellow/green
 traffic lights and the `masa — Darwin` title, the full 256-colour and
 24-bit-RGB ANSI palette, and a blinking block cursor.
+
+![Masa Terminal](assets/masa-term.png)
 
 ```sh
 make gui

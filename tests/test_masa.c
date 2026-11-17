@@ -5353,7 +5353,8 @@ static void test_android_ndk_compile(void)
         "src/main.c", "src/cc_wrapper.c", "src/swift_wrapper.c",
         "src/sys_shims.c", "src/tool_shims.c", "src/sdk.c",
         "src/xcodeproj.c", "src/brew.c", "src/pack.c", "src/exec.c",
-        "src/doctor.c", "src/danroot.c",
+        "src/doctor.c", "src/danroot.c", "src/danroot_cf.c",
+        "src/danroot_objc.c", "src/danroot_appkit.c",
         "src/platform_posix.c"
     };
     const char *ndk_cc = getenv("ANDROID_CC");

@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for Masa's GUI test runs.
+#
+# SDL2's Linux video backend talks to the desktop session over D-Bus
+# (org.freedesktop.portal, org.freedesktop.ScreenSaver) and libdbus-1 keeps
+# a few session-wide allocations alive for the life of the process.  They
+# are neither allocated nor reachable from Masa's code, and SDL2 does not
+# release them before exit, so the GUI test - which links SDL2 through
+# masa-term and the Danroot AppKit/CoreGraphics backend - reports them as
+# leaks on distributions whose SDL2 is built with D-Bus support (for
+# example Debian trixie).  Only the libdbus-1 frames are matched, so every
+# allocation Masa itself makes is still checked.
+leak:libdbus-1.so

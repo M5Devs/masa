@@ -123,8 +123,12 @@ $(GUI_BIN): $(SRC) $(HEADERS) | $(OBJDIR)
 # The GUI tests reuse the core sources for the CLI/PTY plumbing and drive
 # `masa shell`, so the core binary is built too.  The Danroot AppKit test
 # needs the SDL2 backend compiled in, hence -DMASA_DANROOT_SDL2 here.
+# LSAN_OPTIONS suppresses the one third-party leak SDL2/libdbus leave
+# behind (see scripts/lsan.supp); Masa's own allocations are still checked.
+LSAN_SUPP ?= $(CURDIR)/scripts/lsan.supp
+
 test-gui: $(GUI_TESTBIN) $(BIN)
-	SDL_VIDEODRIVER=dummy ./$(GUI_TESTBIN)
+	SDL_VIDEODRIVER=dummy LSAN_OPTIONS=suppressions=$(LSAN_SUPP) ./$(GUI_TESTBIN)
 
 $(GUI_TESTBIN): tests/test_gui.c $(GUI_SRC) $(SRC) $(HEADERS) include/masa_gui.h | $(OBJDIR)
 	$(CC) $(CFLAGS) -DMASA_NO_MAIN -DMASA_DANROOT_SDL2 $(GUI_CFLAGS) \

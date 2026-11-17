@@ -32,7 +32,9 @@ DIST="$ROOT/dist"
 CFLAGS="-std=c11 -Wall -Wextra -Werror -Iinclude"
 
 # Core translation units, without the platform backend (added per target).
-CORE_SRC="src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/pack.c src/exec.c src/doctor.c src/danroot.c src/danroot_cf.c src/danroot_objc.c"
+# danroot_appkit.c is the SDL2-free stub when MASA_DANROOT_SDL2 is not
+# defined, so it belongs here: the loader references dr_gui_* unconditionally.
+CORE_SRC="src/main.c src/cc_wrapper.c src/swift_wrapper.c src/sys_shims.c src/tool_shims.c src/sdk.c src/xcodeproj.c src/brew.c src/pack.c src/exec.c src/doctor.c src/danroot.c src/danroot_cf.c src/danroot_objc.c src/danroot_appkit.c"
 
 ARCHIVES=""
 

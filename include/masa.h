@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define MASA_VERSION "1.6.0"
+#define MASA_VERSION "1.6.1"
 
 /* Target triple used when MASA_TARGET is not set in the environment. */
 #define MASA_DEFAULT_TARGET "arm64-apple-darwin"
