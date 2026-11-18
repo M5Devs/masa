@@ -3924,6 +3924,110 @@ static void test_brew_index_bad_json(void)
     CHECK(count == 0 || count >= 1);
 }
 
+/*
+ * `masa brew info <name>` falls back to the tiny per-formula endpoint
+ * (<base>/formula/<name>.json) when the full index is not cached.  The mock
+ * API base is a local directory, so the fallback is exercised offline.
+ */
+static void test_brew_info_fallback(void)
+{
+    char dir[] = "/tmp/masa_brewfb_XXXXXX";
+    char api[512];
+    char sub[600];
+    char file[1024];
+    char cache[512];
+    char out[8192];
+    char err[8192];
+    char *argv[5];
+    int rc;
+    static const char *json =
+        "{\"name\":\"wget\","
+        "\"versions\":{\"stable\":\"1.24.5\"},"
+        "\"desc\":\"Internet file retriever\","
+        "\"homepage\":\"https://www.gnu.org/software/wget/\","
+        "\"dependencies\":[\"openssl@3\",\"libidn2\"]}\n";
+
+    if (mkdtemp(dir) == NULL) {
+        g_failed++;
+        return;
+    }
+    snprintf(api, sizeof(api), "%s/api", dir);
+    snprintf(sub, sizeof(sub), "%s/formula", api);
+    snprintf(cache, sizeof(cache), "%s/cache", dir);
+    if (masa_mkdir_p(sub) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+    snprintf(file, sizeof(file), "%s/wget.json", sub);
+    if (write_file(file, json) != 0) {
+        g_failed++;
+        remove_tree(dir);
+        return;
+    }
+
+    /* A file:// base is read straight from disk. */
+    {
+        char base[600];
+
+        snprintf(base, sizeof(base), "file://%s", api);
+        set_env(MASA_BREW_API_BASE_ENV, base);
+    }
+    set_env(MASA_BREW_CACHE_ENV, cache);
+
+    argv[0] = "masa";
+    argv[1] = "brew";
+    argv[2] = "info";
+    argv[3] = "wget";
+    argv[4] = NULL;
+
+    /* No cached formula.json: the per-formula endpoint supplies the data. */
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  fallback stderr: %s\n", err);
+    }
+    CHECK(rc == 0);
+    CHECK_CONTAINS(out, "wget 1.24.5");
+    CHECK_CONTAINS(out, "Internet file retriever");
+    CHECK_CONTAINS(out, "https://www.gnu.org/software/wget/");
+    CHECK_CONTAINS(out, "openssl@3");
+
+    /* A name the endpoint does not serve is still a clean error. */
+    argv[3] = "nosuchformula";
+    rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+    CHECK(rc != 0);
+    CHECK_CONTAINS(err, "no formula named");
+
+    /* A cached index that lacks the name also falls back to the endpoint. */
+    {
+        char idx[600];
+        static const char *index_json =
+            "[{\"name\":\"curl\",\"versions\":{\"stable\":\"8.5.0\"},"
+            "\"desc\":\"d\",\"homepage\":\"h\",\"dependencies\":[]}]\n";
+
+        if (masa_mkdir_p(cache) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            reset_masa_env();
+            return;
+        }
+        snprintf(idx, sizeof(idx), "%s/formula.json", cache);
+        if (write_file(idx, index_json) != 0) {
+            g_failed++;
+            remove_tree(dir);
+            reset_masa_env();
+            return;
+        }
+        argv[3] = "wget";
+        rc = run_masa(argv, out, sizeof(out), err, sizeof(err));
+        CHECK(rc == 0);
+        CHECK_CONTAINS(out, "wget 1.24.5");
+    }
+
+    remove_tree(dir);
+    reset_masa_env();
+}
+
 /* ------------------------------------------------------------------ */
 /* Milestone 10: `masa pack` (.ipa and .dmg)                          */
 /* ------------------------------------------------------------------ */
@@ -7242,6 +7346,7 @@ int main(void)
     RUN(test_clipboard_shim_symlinks);
     RUN(test_brew_index);
     RUN(test_brew_index_bad_json);
+    RUN(test_brew_info_fallback);
     RUN(test_brew_tap_local);
     RUN(test_pack_ipa);
     RUN(test_pack_dmg);

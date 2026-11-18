@@ -4,7 +4,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Language: C11](https://img.shields.io/badge/language-C11-00599C.svg)](#requirements)
-[![Version: v1.8.0](https://img.shields.io/badge/version-v1.8.0-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
+[![Version: v1.8.1](https://img.shields.io/badge/version-v1.8.1-brightgreen.svg)](https://github.com/M5Devs/masa/releases)
 [![Platforms: Linux | Windows | Android](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20Android-lightgrey.svg)](#portability)
 
 > **Build and package macOS Mach-O binaries on Linux, Windows & Android — and
@@ -50,7 +50,7 @@ Masa is licensed under the GNU General Public License v3.0 or later. See
 
 ## What's in the box
 
-Every capability below ships in **v1.8.0**, inside one dependency-free C11
+Every capability below ships in **v1.8.1**, inside one dependency-free C11
 binary.
 
 | Capability | Command | What it does |
@@ -159,7 +159,7 @@ echo "hello" | pbcopy && pbpaste          # clipboard shims
 
 ## Status
 
-Milestone 18 (v1.8.0): **a full multi-tab terminal, clipboard shims and an
+Milestone 18 (v1.8.1): **a full multi-tab terminal, clipboard shims and an
 online Homebrew index.** `masa-term` grows from a single window into an
 iTerm2-style terminal: up to **16 tabs**, each owning its own
 pseudo-terminal *and* its own libvterm screen, opened with **Ctrl-Shift-T**,
@@ -175,7 +175,11 @@ works deterministically in a headless container. Finally, `masa brew` gains
 three **online index** subcommands — `masa brew update` fetches the Homebrew
 `formula.json` index into a cache, and `masa brew info <name>` /
 `masa brew search <query>` query it offline through a small dependency-free
-JSON reader. This sits on the Milestone 17 (v1.7.0) **online Homebrew, cask
+JSON reader. **v1.8.1** polishes that index: every `curl` call carries a
+10 s connect / 60 s overall timeout, `masa brew info <name>` falls back to
+the tiny per-formula endpoint when the index is not cached, and the JSON
+reader walks the index in strict linear time. This sits on the Milestone 17
+(v1.7.0) **online Homebrew, cask
 support and partial
 Flutter/Dart framework stubs.** `masa brew` now understands **Homebrew
 Casks** (`cask "name" do ... end`) alongside formulas: `masa brew lint`
@@ -775,12 +779,18 @@ masa brew search ssl
 # openssl@3
 ```
 
-`masa brew update` downloads `formula.json` with `curl -fSL` (a `file://` URL
-or a bare path is copied from the local filesystem, so it is testable
-offline) into `$MASA_BREW_CACHE` (default `~/.masa/brew`). `masa brew info`
-and `masa brew search` read that cache through a small dependency-free JSON
-reader (`src/brew.c`) — no `jq`, no Ruby — and `$MASA_BREW_API_BASE`
-overrides the `https://formulae.brew.sh/api` base.
+`masa brew update` downloads `formula.json` with `curl -fSL`
+(`--connect-timeout 10 --max-time 60`, so a slow or stalled mirror never
+hangs; a `file://` URL or a bare path is copied from the local filesystem, so
+it is testable offline) into `$MASA_BREW_CACHE` (default `~/.masa/brew`).
+`masa brew info` and `masa brew search` read that cache through a small
+dependency-free JSON reader (`src/brew.c`) — no `jq`, no Ruby — in strict
+linear time, so even a ~30 MB index walks in well under a second. When the
+index is not cached yet — or does not hold the name — `masa brew info <name>`
+falls back to the tiny per-formula endpoint
+(`<base>/formula/<name>.json`, a couple of KB), so a one-off lookup needs no
+`masa brew update` at all. `$MASA_BREW_API_BASE` overrides the
+`https://formulae.brew.sh/api` base.
 
 ### `masa pack`
 

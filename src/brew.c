@@ -34,6 +34,28 @@
 /* Small helpers                                                      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Download url into path with curl, bounded by a 10 s connect timeout and a
+ * 60 s overall limit so a slow or stalled mirror can never hang `masa brew`.
+ * Returns curl's exit status (0 on success).
+ */
+static int brew_curl_to_file(const char *url, const char *path)
+{
+    const char *argv[10];
+
+    argv[0] = "curl";
+    argv[1] = "-fSL";
+    argv[2] = "--connect-timeout";
+    argv[3] = "10";
+    argv[4] = "--max-time";
+    argv[5] = "60";
+    argv[6] = "-o";
+    argv[7] = path;
+    argv[8] = url;
+    argv[9] = NULL;
+    return masa_spawn_wait(argv);
+}
+
 /* Replace *slot with a fresh copy of value (freeing the old one). */
 static int set_field(char **slot, const char *value)
 {
@@ -1467,16 +1489,8 @@ int masa_brew_fetch_archive(const char *url, const char *expect_sha,
         }
         printf("masa: brew: copied %s -> %s\n", src, path);
     } else {
-        const char *argv[6];
-        int rc;
+        int rc = brew_curl_to_file(url, path);
 
-        argv[0] = "curl";
-        argv[1] = "-fSL";
-        argv[2] = "-o";
-        argv[3] = path;
-        argv[4] = url;
-        argv[5] = NULL;
-        rc = masa_spawn_wait(argv);
         if (rc != 0) {
             fprintf(stderr,
                     "masa: brew fetch: curl failed for %s (status %d)\n", url,
@@ -1813,34 +1827,52 @@ static int json_utf8(uint32_t cp, char *out)
  * malloc'd UTF-8 copy and advancing past the closing quote.  Returns NULL
  * on a malformed or unterminated string (leaving j->p unchanged when it
  * never saw an opening quote).
+ *
+ * The string is measured first so the buffer is sized to the decoded
+ * length, never to the rest of the document: sizing to the remainder would
+ * make a full walk of a multi-megabyte formula.json quadratic in both time
+ * and allocation.  Two linear passes over the string keep the whole scan
+ * strictly O(N).
  */
 static char *json_string(struct json *j)
 {
-    char *out;
+    const char *q;
+    const char *scan;
     size_t cap;
+    char *out;
     size_t len = 0;
 
     if (j->p >= j->end || *j->p != '"') {
         return NULL;
     }
-    j->p++;
-    cap = (size_t)(j->end - j->p) + 1;
+    q = j->p + 1;
+
+    for (scan = q; scan < j->end; scan++) {
+        if (*scan == '\\') {
+            scan++;
+            continue;
+        }
+        if (*scan == '"') {
+            break;
+        }
+    }
+    if (scan >= j->end) {
+        return NULL;
+    }
+    cap = (size_t)(scan - q) + 1;
     out = malloc(cap);
     if (out == NULL) {
         return NULL;
     }
 
-    while (j->p < j->end) {
+    j->p = q;
+    while (j->p < scan) {
         char c = *j->p++;
 
-        if (c == '"') {
-            out[len] = '\0';
-            return out;
-        }
         if (c == '\\') {
             char e;
 
-            if (j->p >= j->end) {
+            if (j->p >= scan) {
                 break;
             }
             e = *j->p++;
@@ -1857,15 +1889,15 @@ static char *json_string(struct json *j)
                 unsigned cp = 0;
                 int k;
 
-                for (k = 0; k < 4 && j->p < j->end; k++) {
+                for (k = 0; k < 4 && j->p < scan; k++) {
                     cp = (cp << 4) | (unsigned)hexval(*j->p++);
                 }
-                if (cp >= 0xD800 && cp <= 0xDBFF && j->p + 1 < j->end &&
+                if (cp >= 0xD800 && cp <= 0xDBFF && j->p + 1 < scan &&
                     j->p[0] == '\\' && j->p[1] == 'u') {
                     unsigned lo = 0;
 
                     j->p += 2;
-                    for (k = 0; k < 4 && j->p < j->end; k++) {
+                    for (k = 0; k < 4 && j->p < scan; k++) {
                         lo = (lo << 4) | (unsigned)hexval(*j->p++);
                     }
                     if (lo >= 0xDC00 && lo <= 0xDFFF) {
@@ -1884,8 +1916,9 @@ static char *json_string(struct json *j)
         }
     }
 
-    free(out);
-    return NULL;
+    j->p = scan + 1;
+    out[len] = '\0';
+    return out;
 }
 
 /* Skip one JSON value.  Returns 0 on success and -1 on a malformed doc. */
@@ -2374,7 +2407,6 @@ int masa_brew_update_main(int argc, char *const argv[])
         }
         printf("masa: brew: copied %s -> %s\n", src, dest);
     } else {
-        const char *curl[6];
         char url[MASA_PATH_MAX];
         int rc;
 
@@ -2383,13 +2415,7 @@ int masa_brew_update_main(int argc, char *const argv[])
             fprintf(stderr, "masa: brew update: URL too long\n");
             return 1;
         }
-        curl[0] = "curl";
-        curl[1] = "-fSL";
-        curl[2] = "-o";
-        curl[3] = dest;
-        curl[4] = url;
-        curl[5] = NULL;
-        rc = masa_spawn_wait(curl);
+        rc = brew_curl_to_file(url, dest);
         if (rc != 0) {
             fprintf(stderr,
                     "masa: brew update: curl failed for %s (status %d)\n", url,
@@ -2415,8 +2441,8 @@ int masa_brew_update_main(int argc, char *const argv[])
     return 0;
 }
 
-/* Load the cached formula.json; report how to fetch it when missing. */
-static int brew_load_index(char **out, size_t *out_len)
+/* Load the cached formula.json.  When quiet is 0, report how to fetch it. */
+static int brew_load_index(char **out, size_t *out_len, int quiet)
 {
     char cache[MASA_PATH_MAX];
     char dest[MASA_PATH_MAX];
@@ -2425,16 +2451,116 @@ static int brew_load_index(char **out, size_t *out_len)
     if (brew_cache_dir(cache, sizeof(cache)) != 0 ||
         snprintf(dest, sizeof(dest), "%s/formula.json", cache) >=
             (int)sizeof(dest)) {
-        fprintf(stderr, "masa: brew: cache path too long\n");
+        if (!quiet) {
+            fprintf(stderr, "masa: brew: cache path too long\n");
+        }
         return -1;
     }
     if (read_whole_file(dest, out, out_len, err, sizeof(err)) != 0) {
-        fprintf(stderr,
-                "masa: brew: no cached index (%s); run `masa brew update`\n",
-                dest);
+        if (!quiet) {
+            fprintf(stderr,
+                    "masa: brew: no cached index (%s); run `masa brew update`\n",
+                    dest);
+        }
         return -1;
     }
     return 0;
+}
+
+/*
+ * Fetch one formula's small JSON from <base>/formula/<name>.json.  A
+ * file:// URL or a bare path is read from the local filesystem (so the
+ * fallback is testable offline); anything with a scheme is downloaded with
+ * curl, bounded by brew_curl_to_file.  On success out and out_len hold the
+ * malloc'd document, which the caller frees.
+ */
+static int brew_fetch_formula_json(const char *base, const char *name,
+                                   char **out, size_t *out_len)
+{
+    char src[MASA_PATH_MAX];
+    char err[256];
+    const char *sep;
+    const char *local = NULL;
+    int is_local;
+
+    *out = NULL;
+    *out_len = 0;
+
+    if (base == NULL || base[0] == '\0') {
+        base = MASA_BREW_API_BASE_DEFAULT;
+    }
+    sep = (base[strlen(base) - 1] == '/') ? "" : "/";
+
+    if (strncmp(base, "file://", 7) == 0) {
+        is_local = 1;
+        local = base + 7;
+    } else if (strstr(base, "://") == NULL) {
+        is_local = 1;
+        local = base;
+    } else {
+        is_local = 0;
+    }
+
+    if (is_local) {
+        if (snprintf(src, sizeof(src), "%s%sformula/%s.json", local, sep,
+                     name) >= (int)sizeof(src)) {
+            return -1;
+        }
+        return read_whole_file(src, out, out_len, err, sizeof(err));
+    }
+
+    if (snprintf(src, sizeof(src), "%s%sformula/%s.json", base, sep, name) >=
+        (int)sizeof(src)) {
+        return -1;
+    }
+    {
+        char dir[MASA_PATH_MAX];
+        char dest[MASA_PATH_MAX];
+        int rc;
+
+        if (masa_make_temp_dir("masa-brew-", dir, sizeof(dir)) != 0) {
+            return -1;
+        }
+        if (snprintf(dest, sizeof(dest), "%s/formula.json", dir) >=
+            (int)sizeof(dest)) {
+            masa_rmdir(dir);
+            return -1;
+        }
+        rc = brew_curl_to_file(src, dest);
+        if (rc == 0 && read_whole_file(dest, out, out_len, err, sizeof(err)) != 0) {
+            rc = -1;
+        }
+        masa_unlink(dest);
+        masa_rmdir(dir);
+        return (rc == 0) ? 0 : -1;
+    }
+}
+
+/*
+ * Parse a single formula object (the per-formula endpoint's shape) into
+ * info, accepting either a bare object or a one-element array.  Returns 0
+ * when the object names `name`.
+ */
+static int brew_info_lookup_object(const char *text, size_t len, const char *name,
+                                   struct masa_brew_formula_info *out)
+{
+    struct json j;
+
+    j.p = text;
+    j.end = text + len;
+    json_ws(&j);
+    if (j.p < j.end && *j.p == '[') {
+        return masa_brew_info_lookup(text, len, name, out);
+    }
+    memset(out, 0, sizeof(*out));
+    if (json_parse_formula(&j, out) != 0) {
+        return -1;
+    }
+    if (out->name != NULL && str_ieq(out->name, name)) {
+        return 0;
+    }
+    masa_brew_formula_info_free(out);
+    return -1;
 }
 
 int masa_brew_info_main(int argc, char *const argv[])
@@ -2442,20 +2568,40 @@ int masa_brew_info_main(int argc, char *const argv[])
     char *text = NULL;
     size_t text_len = 0;
     struct masa_brew_formula_info info;
+    int found = 0;
 
     if (argc < 1 || argv[0] == NULL || argv[0][0] == '\0') {
         fprintf(stderr, "masa: brew info: missing <name>\n");
         return 2;
     }
-    if (brew_load_index(&text, &text_len) != 0) {
-        return 1;
-    }
-    if (masa_brew_info_lookup(text, text_len, argv[0], &info) != 0) {
-        fprintf(stderr, "masa: brew info: no formula named '%s'\n", argv[0]);
+
+    /*
+     * Prefer the cached index; when it is absent or does not hold the name,
+     * fall back to the tiny per-formula endpoint (~2 KB instead of the full
+     * ~30 MB formula.json).
+     */
+    if (brew_load_index(&text, &text_len, 1) == 0) {
+        if (masa_brew_info_lookup(text, text_len, argv[0], &info) == 0) {
+            found = 1;
+        }
         free(text);
+        text = NULL;
+    }
+    if (!found) {
+        char *doc = NULL;
+        size_t doc_len = 0;
+
+        if (brew_fetch_formula_json(brew_api_base(), argv[0], &doc, &doc_len) == 0) {
+            if (brew_info_lookup_object(doc, doc_len, argv[0], &info) == 0) {
+                found = 1;
+            }
+            free(doc);
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "masa: brew info: no formula named '%s'\n", argv[0]);
         return 1;
     }
-    free(text);
 
     printf("%s %s\n", info.name, (info.version != NULL) ? info.version : "");
     if (info.desc != NULL) {
@@ -2488,7 +2634,7 @@ int masa_brew_search_main(int argc, char *const argv[])
         fprintf(stderr, "masa: brew search: missing <query>\n");
         return 2;
     }
-    if (brew_load_index(&text, &text_len) != 0) {
+    if (brew_load_index(&text, &text_len, 0) != 0) {
         return 1;
     }
     names = masa_brew_search(text, text_len, argv[0], &count);
